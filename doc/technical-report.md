@@ -55,7 +55,7 @@ standards conformance.
   48 handovers.
 * clang-format check (ns-3 `utils/check-style-clang-format.py`, clang-format 20) clean; zero
   compiler warnings from the module.
-* Phase 2: 6 more test cases (17 in total, the 11 Phase 1 cases unchanged and passing). Mutation
+* Phase 2: 5 more test cases (16 in total, the 11 Phase 1 cases unchanged and passing). Mutation
   checks: wrong plane offset, disabled secondary-link handling, sticky policy ignoring the
   current satellite, missing gateway return routes and lowest-elevation gateway choice each make
   the suite fail. V1–V3 result files are byte-identical to Phase 1.

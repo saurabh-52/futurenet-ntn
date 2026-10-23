@@ -565,7 +565,7 @@ a trace fires), and how to plug in a new policy. Example for M02: listen to `Ass
 
 ### P2.7 Step 16 — Tests, mutation checks and problems found
 
-Six new test cases (17 in total; the 11 Phase 1 cases are unchanged and pass):
+Five new test cases (16 in total; the 11 Phase 1 cases are unchanged and pass):
 
 | Test case | What it proves |
 |---|---|
@@ -602,7 +602,7 @@ Problems met on the way (and what we learned):
 | Second policy + comparison | ✔ sticky: −11 % handovers, +0.55 ms mean delay (V4) |
 | `MaxAssociationsPerGround` 1–4 | ✔ default 1 = Phase 1 behaviour |
 | API for other modules | ✔ section in `doc/futurenet-ntn.rst` (waiting for M02/M03 review) |
-| Tests | ✔ 17 / 17 (11 Phase 1 unchanged) |
+| Tests | ✔ 16 / 16 (11 Phase 1 unchanged) |
 | Validation | ✔ V1–V4, 11 PASS lines; V1–V3 files identical to Phase 1 |
 | Style / warnings | ✔ clang-format clean, 0 warnings |
 

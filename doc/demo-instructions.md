@@ -29,8 +29,8 @@ Expected: build finishes without errors or warnings from `contrib/futurenet-ntn`
 ./build/utils/ns3.46.1-test-runner-default --test-name=futurenet-ntn --verbose   # per test case
 ```
 
-Expected: `1 of 1 tests passed`, and 17 test-case lines starting with `PASS` in the verbose run
-(11 Phase 1 + 6 Phase 2).
+Expected: `1 of 1 tests passed`, and 16 test-case lines starting with `PASS` in the verbose run
+(11 Phase 1 + 5 Phase 2).
 
 ## 3. Basic example — one satellite pass
 
