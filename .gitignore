@@ -1,0 +1,20 @@
+# Build outputs (ns-3 builds into its own build/ and cmake-cache/ directories)
+build/
+cmake-cache/
+*.o
+*.so
+
+# Generated simulation output - regenerate with the examples / tools scripts.
+# Small validation results are kept under doc/validation/ (explicitly un-ignored below).
+*.csv
+*.xml
+*.pcap
+*.tr
+*.png
+!doc/validation/**
+
+# Python / editor clutter
+__pycache__/
+*.pyc
+.vscode/
+.idea/
