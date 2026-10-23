@@ -27,3 +27,9 @@ build_lib_example(
     ${libapplications}
     ${libflow-monitor}
 )
+
+build_lib_example(
+  NAME ntn-example-isl
+  SOURCE_FILES ntn-example-isl.cc
+  LIBRARIES_TO_LINK ${libfuturenet-ntn}
+)
