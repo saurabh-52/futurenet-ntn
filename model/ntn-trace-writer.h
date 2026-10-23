@@ -28,11 +28,15 @@ namespace ns3
  * 2. Common event log (Common Guidelines section 4.5), one row per event:
  *    time_s,module,event,node_id,peer_id,flow_id,value1,value2,unit,detail
  *    The `unit` column names what value1 and value2 mean, separated by '|'. Events:
- *    VisibilityChange, AssociationChange, SecondaryAssociationChange, GatewayVisibilityChange
- *    and GatewayAssociationChange.
+ *    VisibilityChange, AssociationChange, SecondaryAssociationChange, GatewayVisibilityChange,
+ *    GatewayAssociationChange and IslStateChange.
+ * 3. ISL CSV (Phase 3, optional), one row per ISL that is *up* per sample (writing every
+ *    satellite pair would give S^2/2 rows per sample):
+ *    time_s,satellite_a,satellite_b,distance_km,clearance_km,delay_ms
  *
- * Either file is optional. Output is fully deterministic (fixed number formatting), so two
- * runs with the same configuration produce byte-identical files.
+ * Every file is optional; the ISL CSV uses the same sample interval as the link-state CSV. Output
+ * is fully deterministic (fixed number formatting), so two runs with the same configuration produce
+ * byte-identical files.
  */
 class NtnTraceWriter : public Object
 {
@@ -57,6 +61,12 @@ class NtnTraceWriter : public Object
      * @param path output file path
      */
     void OpenEventLogFile(const std::string& path);
+
+    /**
+     * Open the ISL CSV and write its header. Call before Connect().
+     * @param path output file path
+     */
+    void OpenIslFile(const std::string& path);
 
     /**
      * Start writing rows from a link manager's traces.
@@ -123,6 +133,14 @@ class NtnTraceWriter : public Object
                                         int32_t newGatewayId);
 
     /**
+     * IslStateChange handler.
+     * @param satelliteA lower satellite node ID
+     * @param satelliteB higher satellite node ID
+     * @param up true if the ISL came up, false if it went down
+     */
+    void HandleIslStateChange(uint32_t satelliteA, uint32_t satelliteB, bool up);
+
+    /**
      * Write one link-state CSV row.
      * @param now sample time
      * @param pair the pair (ground terminal or gateway with a satellite)
@@ -132,6 +150,7 @@ class NtnTraceWriter : public Object
     Ptr<NtnLinkManager> m_manager; //!< Manager being followed
     std::ofstream m_linkStateFile; //!< Link-state CSV
     std::ofstream m_eventLogFile;  //!< Common event log CSV
+    std::ofstream m_islFile;       //!< ISL CSV
     Time m_sampleInterval;         //!< Minimum time between link-state samples
     Time m_nextSampleTime;         //!< Earliest time of the next link-state sample
 };

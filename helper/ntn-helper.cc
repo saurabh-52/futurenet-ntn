@@ -85,6 +85,12 @@ NtnHelper::SetDelayAttribute(const std::string& name, const AttributeValue& valu
 }
 
 void
+NtnHelper::SetIslAttribute(const std::string& name, const AttributeValue& value)
+{
+    m_linkManager->GetIslModel()->SetAttribute(name, value);
+}
+
+void
 NtnHelper::SetPolicy(Ptr<NtnAssociationPolicy> policy)
 {
     m_linkManager->SetPolicy(policy);
@@ -263,7 +269,8 @@ NtnHelper::GetGatewayServiceAddress() const
 void
 NtnHelper::EnableTracing(const std::string& linkStateCsv,
                          const std::string& eventLogCsv,
-                         Time sampleInterval)
+                         Time sampleInterval,
+                         const std::string& islCsv)
 {
     NS_ABORT_MSG_IF(m_traceWriter, "EnableTracing() may only be called once");
     m_traceWriter = CreateObject<NtnTraceWriter>();
@@ -275,6 +282,10 @@ NtnHelper::EnableTracing(const std::string& linkStateCsv,
     if (!eventLogCsv.empty())
     {
         m_traceWriter->OpenEventLogFile(eventLogCsv);
+    }
+    if (!islCsv.empty())
+    {
+        m_traceWriter->OpenIslFile(islCsv);
     }
     m_traceWriter->Connect(m_linkManager);
 }

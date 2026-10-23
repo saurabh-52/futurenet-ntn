@@ -26,6 +26,7 @@
 #include "ns3/ntn-ground-terminal-mobility-model.h"
 #include "ns3/ntn-helper.h"
 #include "ns3/ntn-ip-link-controller.h"
+#include "ns3/ntn-isl-model.h"
 #include "ns3/ntn-link-manager.h"
 #include "ns3/ntn-propagation-delay-model.h"
 #include "ns3/ntn-trace-writer.h"
@@ -1694,6 +1695,209 @@ class NtnGatewayIntegrationTestCase : public TestCase
 
 /**
  * @ingroup futurenet-ntn-tests
+ * T1 / T2 / T3 / T4 for M01-FR-12: ISL defaults and rejected values, the range / Earth-clearance
+ * rule against hand-computed geometry, link state and neighbours in the manager, and the
+ * IslStateChange trace, event-log rows and ISL CSV during a scripted drift.
+ */
+class NtnIslTestCase : public TestCase
+{
+  public:
+    NtnIslTestCase()
+        : TestCase("T1 T2 T3 T4 M01-FR-12 inter-satellite links: range and Earth blocking")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        // T1
+        BooleanValue enabled;
+        CreateObject<NtnLinkManager>()->GetAttribute("EnableIsl", enabled);
+        NS_TEST_ASSERT_MSG_EQ(enabled.Get(), false, "EnableIsl default must be false");
+        Ptr<NtnIslModel> isl = CreateObject<NtnIslModel>();
+        DoubleValue d;
+        isl->GetAttribute("MaxIslRange", d);
+        NS_TEST_ASSERT_MSG_EQ(d.Get(), 5000e3, "MaxIslRange default 5,000 km");
+        isl->GetAttribute("IslMinClearance", d);
+        NS_TEST_ASSERT_MSG_EQ(d.Get(), 0.0, "IslMinClearance default 0 m");
+
+        // T2
+        NS_TEST_EXPECT_MSG_EQ(isl->SetAttributeFailSafe("MaxIslRange", DoubleValue(99e3)),
+                              false,
+                              "range below 100 km rejected");
+        NS_TEST_EXPECT_MSG_EQ(isl->SetAttributeFailSafe("MaxIslRange", DoubleValue(20001e3)),
+                              false,
+                              "range above 20,000 km rejected");
+        NS_TEST_EXPECT_MSG_EQ(isl->SetAttributeFailSafe("IslMinClearance", DoubleValue(-1.0)),
+                              false,
+                              "negative clearance rejected");
+        NS_TEST_EXPECT_MSG_EQ(isl->SetAttributeFailSafe("IslMinClearance", DoubleValue(1001e3)),
+                              false,
+                              "clearance above 1,000 km rejected");
+        isl->SetMaxIslRange(5000e3);
+
+        // T3 geometry: two satellites on a 600 km equatorial ring, angle theta apart.
+        // distance = 2 a sin(theta/2); the line's lowest point is its middle, at radius
+        // a cos(theta/2), so clearance = a cos(theta/2) - R.
+        const double a = ORBIT_RADIUS_600_KM_M;
+        auto onRing = [a](double thetaDeg) {
+            const double t = ntn::DegToRad(thetaDeg);
+            return Vector(a * std::cos(t), a * std::sin(t), 0.0);
+        };
+        const Vector origin = onRing(0.0);
+        for (double thetaDeg : {30.0, 40.0, 60.0})
+        {
+            const double half = ntn::DegToRad(thetaDeg / 2);
+            NS_TEST_ASSERT_MSG_EQ_TOL(NtnIslModel::ComputeLineClearanceM(origin, onRing(thetaDeg)),
+                                      a * std::cos(half) - ntn::EARTH_RADIUS_M,
+                                      POSITION_TOLERANCE_M,
+                                      "clearance at " << thetaDeg << " deg");
+        }
+        // 30 deg: 3,608 km, 362 km clear -> up. 60 deg: line passes 334 km below the surface.
+        NS_TEST_ASSERT_MSG_EQ(
+            isl->IsLinkPossible(CalculateDistance(origin, onRing(30.0)),
+                                NtnIslModel::ComputeLineClearanceM(origin, onRing(30.0))),
+            true,
+            "30 deg apart: ISL possible");
+        isl->SetMaxIslRange(20000e3);
+        NS_TEST_ASSERT_MSG_EQ(
+            isl->IsLinkPossible(CalculateDistance(origin, onRing(60.0)),
+                                NtnIslModel::ComputeLineClearanceM(origin, onRing(60.0))),
+            false,
+            "60 deg apart: Earth blocks even with a long range");
+        // 40 deg: clearance 179.6 km -> allowed with a 100 km margin, not with 200 km.
+        const double clearance40M = NtnIslModel::ComputeLineClearanceM(origin, onRing(40.0));
+        isl->SetIslMinClearance(100e3);
+        NS_TEST_ASSERT_MSG_EQ(isl->IsLinkPossible(4768e3, clearance40M), true, "100 km margin");
+        isl->SetIslMinClearance(200e3);
+        NS_TEST_ASSERT_MSG_EQ(isl->IsLinkPossible(4768e3, clearance40M), false, "200 km margin");
+        // Both points on one radius: the closest point of the infinite line is the Earth centre,
+        // but the closest point of the *segment* is its lower end (clearance 600 km).
+        NS_TEST_ASSERT_MSG_EQ_TOL(
+            NtnIslModel::ComputeLineClearanceM(origin, Vector(a + 1000e3, 0.0, 0.0)),
+            600e3,
+            POSITION_TOLERANCE_M,
+            "segment, not infinite line");
+
+        // T3 in the manager: satellites 0, 30 and 60 deg apart on the ring.
+        Ptr<Node> s0 = CreateSatelliteNode(0.0, 0.0);
+        Ptr<Node> s30 = CreateSatelliteNode(0.0, 30.0);
+        Ptr<Node> s60 = CreateSatelliteNode(0.0, 60.0);
+        Ptr<NtnLinkManager> manager = CreateObject<NtnLinkManager>();
+        manager->SetEnableIsl(true);
+        manager->AddSatelliteNode(s60);
+        manager->AddSatelliteNode(s0);
+        manager->AddSatelliteNode(s30);
+        manager->Update();
+        const uint32_t i0 = s0->GetId();
+        const uint32_t i30 = s30->GetId();
+        const uint32_t i60 = s60->GetId();
+        NS_TEST_ASSERT_MSG_EQ(manager->GetIslStates().size(), 3, "3 pairs for 3 satellites");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetIslState(i0, i30).up, true, "0-30 up");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetIslState(i30, i60).up, true, "30-60 up");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetIslState(i60, i0).up, false, "0-60 blocked (any order)");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetIslState(i60, i0).satelliteA,
+                              std::min(i0, i60),
+                              "pair stored with the lower ID first");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetIslNeighbours(i30).size(), 2, "middle has 2 ISLs");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetIslNeighbours(i0).size(), 1, "end has 1 ISL");
+        const NtnLinkState link = manager->GetIslLinkState(i0, i30);
+        NS_TEST_ASSERT_MSG_EQ(link.available, true, "common LinkState: available");
+        NS_TEST_ASSERT_MSG_EQ_TOL(link.propagationDelayMs,
+                                  2 * a * std::sin(ntn::DegToRad(15.0)) /
+                                      ntn::SPEED_OF_LIGHT_M_PER_S * 1e3,
+                                  ONE_NS_S * 1e3,
+                                  "ISL propagation delay = distance / c");
+        NS_TEST_ASSERT_MSG_EQ_TOL(
+            manager->GetIslState(i0, i30).linkDelay.GetSeconds(),
+            2 * a * std::sin(ntn::DegToRad(15.0)) / ntn::SPEED_OF_LIGHT_M_PER_S + 1e-3,
+            ONE_NS_S,
+            "ISL link delay includes the processing delay");
+        Simulator::Destroy();
+
+        // T4: equatorial satellites at 600 and 1,200 km start together and drift apart at
+        // 0.00724 deg/s. With the 5,000 km range the ISL drops at t = 5,519 s (distance limit);
+        // with a 20,000 km range the Earth blocks it at t = 7,825 s (values from the same
+        // geometry, computed independently with 1 s steps).
+        const auto [rangeEvents, rangeEventLog, rangeCsv] = RunDrift(5000e3);
+        const auto [earthEvents, earthEventLog, earthCsv] = RunDrift(20000e3);
+        NS_TEST_ASSERT_MSG_EQ(rangeEvents.size(), 2, "range case: up and down");
+        NS_TEST_ASSERT_MSG_EQ(earthEvents.size(), 2, "Earth case: up and down");
+        if (rangeEvents.size() == 2 && earthEvents.size() == 2)
+        {
+            NS_TEST_ASSERT_MSG_EQ(rangeEvents[0].first, 0.0, "up at the first update");
+            NS_TEST_ASSERT_MSG_EQ(rangeEvents[0].second, true, "first event: up");
+            NS_TEST_ASSERT_MSG_EQ(rangeEvents[1].second, false, "second event: down");
+            NS_TEST_ASSERT_MSG_EQ_TOL(rangeEvents[1].first, 5519.0, 1.0, "down by range");
+            NS_TEST_ASSERT_MSG_EQ_TOL(earthEvents[1].first, 7825.0, 1.0, "down by Earth");
+        }
+        NS_TEST_ASSERT_MSG_NE(rangeEventLog.find(",futurenet-ntn,IslStateChange,"),
+                              std::string::npos,
+                              "event-log row");
+        NS_TEST_ASSERT_MSG_NE(rangeEventLog.find(",distance_km|clearance_km,down"),
+                              std::string::npos,
+                              "event-log down row");
+        NS_TEST_ASSERT_MSG_EQ(rangeCsv.substr(0, rangeCsv.find('\n')),
+                              "time_s,satellite_a,satellite_b,distance_km,clearance_km,delay_ms",
+                              "ISL CSV header");
+        NS_TEST_ASSERT_MSG_NE(rangeCsv.find("\n0.000000,"), std::string::npos, "ISL CSV rows");
+        NS_TEST_ASSERT_MSG_EQ(rangeCsv.find("\n6000.000000,"),
+                              std::string::npos,
+                              "no row once the ISL is down");
+    }
+
+    /**
+     * Run the drifting pair with a given ISL range and tracing on.
+     * @param maxRangeM MaxIslRange [m]
+     * @return (IslStateChange (time [s], up) list, event log text, ISL CSV text)
+     */
+    std::tuple<std::vector<std::pair<double, bool>>, std::string, std::string> RunDrift(
+        double maxRangeM)
+    {
+        const std::string eventPath = CreateTempDirFilename("isl-events.csv");
+        const std::string islPath = CreateTempDirFilename("isl.csv");
+        m_islEvents.clear();
+        {
+            NodeContainer low;
+            low.Create(1);
+            NodeContainer high;
+            high.Create(1);
+            NtnHelper ntn;
+            ntn.SetOrbitAttribute("OrbitInclination", DoubleValue(0.0));
+            ntn.InstallSatellites(low);
+            ntn.SetOrbitAttribute("OrbitAltitude", DoubleValue(1200e3));
+            ntn.InstallSatellites(high);
+            ntn.SetLinkAttribute("EnableIsl", BooleanValue(true));
+            ntn.SetLinkAttribute("UpdateInterval", TimeValue(Seconds(1)));
+            ntn.SetIslAttribute("MaxIslRange", DoubleValue(maxRangeM));
+            ntn.EnableTracing("", eventPath, Seconds(1000), islPath);
+            ntn.GetLinkManager()->TraceConnectWithoutContext(
+                "IslStateChange",
+                MakeCallback(&NtnIslTestCase::OnIslChange, this));
+            ntn.Start();
+            Simulator::Stop(Seconds(8000));
+            Simulator::Run();
+            Simulator::Destroy();
+        }
+        return {m_islEvents, ReadFile(eventPath), ReadFile(islPath)};
+    }
+
+    /**
+     * IslStateChange sink.
+     * @param satelliteA lower satellite ID
+     * @param satelliteB higher satellite ID
+     * @param up new state
+     */
+    void OnIslChange(uint32_t satelliteA, uint32_t satelliteB, bool up)
+    {
+        m_islEvents.emplace_back(Simulator::Now().GetSeconds(), up);
+    }
+
+    std::vector<std::pair<double, bool>> m_islEvents; //!< IslStateChange (time [s], up)
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
  * The futurenet-ntn test suite.
  */
 class FuturenetNtnTestSuite : public TestSuite
@@ -1718,6 +1922,7 @@ class FuturenetNtnTestSuite : public TestSuite
         AddTestCase(new NtnStickyPolicyTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnGatewayTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnGatewayIntegrationTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnIslTestCase, TestCase::Duration::QUICK);
     }
 };
 
