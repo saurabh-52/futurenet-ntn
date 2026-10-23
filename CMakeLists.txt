@@ -7,6 +7,7 @@ build_lib(
     model/ntn-attribute-checkers.cc
     model/ntn-ground-terminal-mobility-model.cc
     model/ntn-ip-link-controller.cc
+    model/ntn-isl-model.cc
     model/ntn-link-manager.cc
     model/ntn-propagation-delay-model.cc
     model/ntn-trace-writer.cc
@@ -21,6 +22,7 @@ build_lib(
     model/ntn-constants.h
     model/ntn-ground-terminal-mobility-model.h
     model/ntn-ip-link-controller.h
+    model/ntn-isl-model.h
     model/ntn-link-manager.h
     model/ntn-propagation-delay-model.h
     model/ntn-trace-writer.h

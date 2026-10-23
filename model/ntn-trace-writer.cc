@@ -69,6 +69,10 @@ NtnTraceWriter::DoDispose()
     {
         m_eventLogFile.close();
     }
+    if (m_islFile.is_open())
+    {
+        m_islFile.close();
+    }
     m_manager = nullptr;
     Object::DoDispose();
 }
@@ -108,13 +112,22 @@ NtnTraceWriter::OpenEventLogFile(const std::string& path)
 }
 
 void
+NtnTraceWriter::OpenIslFile(const std::string& path)
+{
+    NS_LOG_FUNCTION(this << path);
+    m_islFile.open(path);
+    NS_ABORT_MSG_IF(!m_islFile.is_open(), "Cannot open ISL CSV " << path);
+    m_islFile << std::fixed << "time_s,satellite_a,satellite_b,distance_km,clearance_km,delay_ms\n";
+}
+
+void
 NtnTraceWriter::Connect(Ptr<NtnLinkManager> manager)
 {
     NS_LOG_FUNCTION(this << manager);
     NS_ABORT_MSG_IF(!manager, "Link manager must not be null");
     NS_ABORT_MSG_IF(m_manager, "NtnTraceWriter is already connected to a link manager");
     m_manager = manager;
-    if (m_linkStateFile.is_open())
+    if (m_linkStateFile.is_open() || m_islFile.is_open())
     {
         manager->TraceConnectWithoutContext(
             "UpdateCompleted",
@@ -137,6 +150,9 @@ NtnTraceWriter::Connect(Ptr<NtnLinkManager> manager)
         manager->TraceConnectWithoutContext(
             "GatewayAssociationChange",
             MakeCallback(&NtnTraceWriter::HandleGatewayAssociationChange, this));
+        manager->TraceConnectWithoutContext(
+            "IslStateChange",
+            MakeCallback(&NtnTraceWriter::HandleIslStateChange, this));
     }
 }
 
@@ -148,13 +164,32 @@ NtnTraceWriter::HandleUpdateCompleted(Time now)
         return;
     }
     m_nextSampleTime = now + m_sampleInterval;
-    for (const auto& pair : m_manager->GetPairStates())
+    if (m_linkStateFile.is_open())
     {
-        WriteLinkStateRow(now, pair);
+        for (const auto& pair : m_manager->GetPairStates())
+        {
+            WriteLinkStateRow(now, pair);
+        }
+        for (const auto& pair : m_manager->GetGatewayPairStates())
+        {
+            WriteLinkStateRow(now, pair);
+        }
     }
-    for (const auto& pair : m_manager->GetGatewayPairStates())
+    if (m_islFile.is_open())
     {
-        WriteLinkStateRow(now, pair);
+        constexpr double MS_PER_S = 1e3;
+        for (const auto& isl : m_manager->GetIslStates())
+        {
+            if (!isl.up)
+            {
+                continue;
+            }
+            m_islFile << std::setprecision(TIME_DECIMALS) << now.GetSeconds() << ','
+                      << isl.satelliteA << ',' << isl.satelliteB << ','
+                      << std::setprecision(VALUE_DECIMALS) << isl.distanceM / M_PER_KM << ','
+                      << isl.clearanceM / M_PER_KM << ',' << isl.linkDelay.GetSeconds() * MS_PER_S
+                      << '\n';
+        }
     }
 }
 
@@ -263,6 +298,17 @@ NtnTraceWriter::HandleGatewayAssociationChange(uint32_t satelliteId,
                        << pair.linkDelay.GetSeconds() * MS_PER_S;
     }
     m_eventLogFile << ",old_gateway_id|delay_ms," << detail << '\n';
+}
+
+void
+NtnTraceWriter::HandleIslStateChange(uint32_t satelliteA, uint32_t satelliteB, bool up)
+{
+    const NtnIslState isl = m_manager->GetIslState(satelliteA, satelliteB);
+    m_eventLogFile << std::setprecision(TIME_DECIMALS) << Simulator::Now().GetSeconds() << ','
+                   << MODULE_NAME << ",IslStateChange," << satelliteA << ',' << satelliteB << ",,"
+                   << std::setprecision(VALUE_DECIMALS) << isl.distanceM / M_PER_KM << ','
+                   << isl.clearanceM / M_PER_KM << ",distance_km|clearance_km,"
+                   << (up ? "up" : "down") << '\n';
 }
 
 } // namespace ns3

@@ -74,6 +74,22 @@ struct NtnPairState
 
 /**
  * @ingroup futurenet-ntn
+ * State of one inter-satellite link (ISL) candidate from the most recent update (SRS
+ * M01-FR-12). The pair is stored with satelliteA < satelliteB.
+ */
+struct NtnIslState
+{
+    uint32_t satelliteA{0}; //!< Lower satellite node ID
+    uint32_t satelliteB{0}; //!< Higher satellite node ID
+    bool up{false};         //!< True if the ISL is possible (range and Earth clearance)
+    double distanceM{0.0};  //!< Straight-line distance between the satellites [m]
+    double clearanceM{0.0}; //!< Lowest altitude of the line of sight [m] (< 0: through Earth)
+    Time propagationDelay;  //!< distance / PropagationSpeed
+    Time linkDelay;         //!< propagationDelay + ProcessingDelay (one-way link delay)
+};
+
+/**
+ * @ingroup futurenet-ntn
  * The current end-to-end path of one ground terminal through the satellite network:
  * ground terminal -> primary satellite -> that satellite's gateway (SRS M01-FR-11).
  *
