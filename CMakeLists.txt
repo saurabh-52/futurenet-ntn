@@ -1,11 +1,15 @@
 build_lib(
   LIBNAME futurenet-ntn
   SOURCE_FILES
+    model/circular-orbit-mobility-model.cc
     model/ntn-attribute-checkers.cc
+    model/ntn-ground-terminal-mobility-model.cc
   HEADER_FILES
+    model/circular-orbit-mobility-model.h
     model/ntn-attribute-checkers.h
     model/ntn-common-types.h
     model/ntn-constants.h
+    model/ntn-ground-terminal-mobility-model.h
   LIBRARIES_TO_LINK
     ${libcore}
     ${libmobility}
