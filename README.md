@@ -10,6 +10,11 @@ Phase 2 (Recommended) adds: multi-plane Walker constellations, up to 4 simultane
 per terminal, a second association policy (`StickyAssociationPolicy`), and gateway ground
 stations with a real terminal → satellite → gateway IP path.
 
+Phase 3 (Optional) adds inter-satellite links (ISLs): two satellites have an ISL when they are
+within `MaxIslRange` and the line between them does not pass through the Earth; ISL state,
+delay, traces, event-log rows and an ISL CSV are provided (routing over ISLs is left to a
+routing module such as M02).
+
 > This is a **geometry / distance / delay abstraction for teaching and system-level studies**.
 > It is **not** a 3GPP NR-NTN PHY/MAC model and makes **no claim of 3GPP or other standards
 > conformance**. Parameter ranges and defaults are project configuration values (SRS M01 §7),
@@ -95,6 +100,9 @@ ntn.SetPolicy("ns3::StickyAssociationPolicy");                        // fewer h
 ntn.SetLinkAttribute("EnableGateway", BooleanValue(true));
 ntn.InstallGateway(gatewayNode, 30.0, 0.0);                           // before InstallIpLinks
 // Traffic to ntn.GetGatewayServiceAddress() goes terminal -> satellite -> gateway.
+ntn.SetLinkAttribute("EnableIsl", BooleanValue(true));                // Phase 3
+ntn.SetIslAttribute("MaxIslRange", DoubleValue(5000e3));              // metres
+ntn.EnableTracing("link-state.csv", "events.csv", Seconds(10), "isl.csv");
 ```
 
 ## Examples
@@ -104,13 +112,15 @@ ntn.InstallGateway(gatewayNode, 30.0, 0.0);                           // before 
 | `ntn-example-basic` | 1 ground station + 1 satellite pass: range/delay table, link-state CSV, event log |
 | `ntn-example-advanced` | N terminals + ring of satellites, UDP traffic, FlowMonitor, handover counts |
 | `ntn-example-constellation` | Walker planes + gateways, UDP echo terminal → satellite → gateway and back, policy choice |
-| `ntn-validation` | Validation cases V1–V4 with closed-form / expected-trend checks, CSVs in `doc/validation/` |
+| `ntn-example-isl` | Walker constellation with ISLs: ISL graph and gateway reachability (direct vs via ISLs) over time |
+| `ntn-validation` | Validation cases V1–V5 with closed-form / expected-trend checks, CSVs in `doc/validation/` |
 | `examples/plot_ntn.py` | Optional matplotlib plot of range, delay and association from the CSV |
 
 ```bash
 ./ns3 run "ntn-example-basic --simulationTime=1000s"
 ./ns3 run "ntn-example-advanced --numGround=20 --numSats=12"     # SRS demonstration size
 ./ns3 run "ntn-example-constellation --policy=sticky --maxAssociations=2"
+./ns3 run "ntn-example-isl --maxIslRangeKm=3000"
 ./ns3 run "ntn-validation --outputDir=contrib/futurenet-ntn/doc/validation"
 python3 contrib/futurenet-ntn/examples/plot_ntn.py ntn-advanced-link-state.csv --ground 12
 ```
@@ -125,7 +135,9 @@ Git commit, seed, run, command line). Use `--PrintHelp` to list every option.
 * **Common event log** (Common Guidelines §4.5):
   `time_s,module,event,node_id,peer_id,flow_id,value1,value2,unit,detail`
   — events `VisibilityChange`, `AssociationChange`, `SecondaryAssociationChange`,
-  `GatewayVisibilityChange`, `GatewayAssociationChange`.
+  `GatewayVisibilityChange`, `GatewayAssociationChange`, `IslStateChange`.
+* **ISL CSV** (optional): `time_s,satellite_a,satellite_b,distance_km,clearance_km,delay_ms`
+  (one row per ISL that is up).
 * With gateways, the link-state CSV also has gateway–satellite rows (`ground_id` = gateway ID).
   Without gateways and with the default settings, all outputs are identical to Phase 1.
 
@@ -138,9 +150,11 @@ Git commit, seed, run, command line). Use `--PrintHelp` to list every option.
 * Handover is break-before-make and instantaneous; a packet in flight on the old link at the
   handover instant is dropped.
 * No PHY/MAC, no Doppler, no NR numerology, no regenerative payload, no standards conformance.
-* No inter-satellite links yet: if a terminal's satellite sees no gateway, traffic to the gateway
-  is dropped. Gateways are not connected to each other. The gateway choice is a fixed rule
-  (highest elevation).
+* ISLs are link state only (no packets routed over them): if a terminal's satellite sees no
+  gateway, IP traffic to the gateway is dropped. Gateways are not connected to each other. The
+  gateway choice is a fixed rule (highest elevation). ISLs have no terminal-count, pointing or
+  capacity limits.
+* Not built (by decision): Earth rotation, link budget, energy model.
 
 ## Documentation
 

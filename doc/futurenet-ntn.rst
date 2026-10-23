@@ -15,7 +15,8 @@ satellites that move on circular orbits, ground terminals, geometric visibility,
 distance-derived propagation delay, satellite association and handover, and real IP traffic over
 links whose delay follows the geometry. Phase 2 adds multi-plane (Walker) constellations, up to
 four simultaneous associations per terminal, a second association policy, and gateway ground
-stations with a real ground -> satellite -> gateway IP path.
+stations with a real ground -> satellite -> gateway IP path. Phase 3 adds inter-satellite links
+(ISLs) with a range and Earth-blocking rule.
 
 .. important::
 
@@ -81,6 +82,8 @@ Class relationships (Mermaid source, renders on GitHub/GitLab):
      NtnAssociationPolicy <|-- HighestElevationPolicy
      NtnAssociationPolicy <|-- StickyAssociationPolicy
      Object <|-- NtnWalkerConstellation
+     Object <|-- NtnIslModel
+     NtnLinkManager o-- NtnIslModel
      Object <|-- NtnLinkManager
      Object <|-- NtnIpLinkController
      Object <|-- NtnTraceWriter
@@ -100,6 +103,7 @@ Responsibilities (one per class, CG-05):
 * ``NtnPropagationDelayModel`` -- path length to delay (``PropagationSpeed``,
   ``ProcessingDelay``).
 * ``NtnWalkerConstellation`` -- divides the satellites between orbital planes (Phase 2).
+* ``NtnIslModel`` -- decides whether two satellites can have an inter-satellite link (Phase 3).
 * ``NtnAssociationPolicy`` / ``HighestElevationPolicy`` / ``StickyAssociationPolicy`` -- choose the
   satellite(s) of a terminal.
 * ``NtnLinkManager`` -- periodic update loop, per-pair state (ground and gateway pairs), trace
@@ -213,6 +217,7 @@ Association and update loop (pseudocode)
    every UpdateInterval:                       # NtnLinkManager::Update()
      compute every satellite position once
      if gateways are registered: UpdateGateways()   # see "Gateways" below
+     if EnableIsl: UpdateIsls()                      # see "Inter-satellite links" below
      for each ground terminal g (registration order):
        candidates = []
        for each satellite s (registration order):
@@ -275,6 +280,43 @@ satellite -> its gateway with both hop delays and their sum (``available`` = fal
 missing). Gateways run first in each update, so listeners of ``AssociationChange`` already see the
 current gateway hop.
 
+Inter-satellite links
+#####################
+
+With ``EnableIsl`` = true, every update checks every satellite pair (SRS M01-FR-12) with
+``NtnIslModel``. A pair has an ISL when
+
+1. the distance is at most ``MaxIslRange`` (default 5,000 km; stands in for terminal power and
+   pointing limits), and
+2. the straight line between the satellites stays at least ``IslMinClearance`` (default 0 m)
+   above the Earth surface -- with 0 this is exactly "the line does not pass through the Earth";
+   a margin can model the atmosphere.
+
+*Clearance geometry.* For the segment A -> B the point closest to the Earth centre is
+:math:`P = A + t(B - A)` with :math:`t = -A\cdot(B-A)/|B-A|^2` **clamped to [0, 1]** (the closest
+point of the infinite line may lie outside the segment, e.g. when both satellites are on one
+radius); clearance = :math:`|P| - R`. For two satellites on one ring of radius *a*, an angle
+:math:`\theta` apart, the lowest point is the middle of the chord: distance
+:math:`2a\sin(\theta/2)`, clearance :math:`a\cos(\theta/2) - R`. At 600 km: 30 deg -> 3,608.5 km,
+362.5 km clear (ISL up); 60 deg -> the line passes 333.9 km *below* the surface (blocked). The
+longest ISL any two 600 km satellites can have is the line-of-sight limit
+:math:`2\sqrt{a^2 - R^2}` = 5,658.7 km.
+
+.. code-block:: text
+
+   UpdateIsls():
+     for each satellite pair (A, B), lower node ID first:
+       distance = |A - B|; clearance = segment clearance; delay = distance / v + processing
+       up = distance <= MaxIslRange and clearance >= IslMinClearance
+       if up != previous: fire IslStateChange(A, B, up)
+       if up: fire IslDelayUpdate(A, B, delay)
+
+The ISL delay uses the same ``NtnPropagationDelayModel`` as the other hops. The module reports
+which ISLs exist and their delay (``GetIslState``, ``GetIslNeighbours``, ``GetIslLinkState``);
+**routing over ISLs is not done here** -- that is the job of a routing module such as M02, which
+can build its graph from these queries and traces. ``ntn-example-isl`` shows such an analysis
+(shortest delay to a gateway) without sending packets.
+
 Network abstraction (IP links)
 ##############################
 
@@ -310,7 +352,9 @@ Performance
 
 Each update evaluates every ground-satellite pair: O(G x S), plus O(W x S) for W gateways. This
 is necessary because any satellite may enter the view of any terminal or gateway. It runs once per
-``UpdateInterval`` (default 100 ms). At the SRS demonstration size (20 x 12 = 240 pairs) the full
+``UpdateInterval`` (default 100 ms). With ISLs, every satellite pair is checked too:
+O(S^2 / 2) = 7,140 pairs for 120 satellites, which dominates; the ISL example therefore uses
+1 s updates (20 min in about 5 s instead of 26 s with 100 ms). At the SRS demonstration size (20 x 12 = 240 pairs) the full
 20-minute advanced example with traffic runs in about 3 s; the constellation example (20
 terminals + 3 gateways x 120 satellites = 2,760 pairs, 1,380 IP links) takes about 12 s. Possible future optimisations: skip satellites on the far side
 of the Earth with one dot product before computing elevation; group satellites by orbit plane
@@ -341,8 +385,12 @@ delay-following links, configurable logical data rate.
   when the association changes is dropped at the satellite.
 * Association and visibility are only re-evaluated every ``UpdateInterval``; events are quantised
   to that interval.
-* No inter-satellite links (Phase 3): a satellite only forwards between its ground links and its
-  gateway link. If the serving satellite sees no gateway, traffic to the gateway is dropped.
+* ISLs are modelled as link state (existence, distance, delay, traces) only; no packets are
+  routed over them, so in the IP model a satellite still only forwards between its ground links
+  and its gateway link, and traffic is dropped if the serving satellite sees no gateway.
+* The ISL rule is purely geometric (range + Earth clearance): no limit on the number of ISL
+  terminals per satellite, no pointing/acquisition time, no ISL capacity or link budget.
+* Optional extras not built (by decision): Earth rotation, link budget, energy model.
 * Gateways are not connected to each other (no terrestrial backbone); replies return only through
   the satellite whose gateway received the request.
 * The gateway choice is a fixed rule (highest elevation); satellites and gateways have no
@@ -391,6 +439,8 @@ Helpers
    ntn.InstallSatellites(satellites);          // N satellites over the planes
    ntn.InstallGroundTerminal(node, latDeg, lonDeg);
    ntn.InstallGateway(gatewayNode, latDeg, lonDeg);
+   ntn.SetLinkAttribute("EnableIsl", BooleanValue(true));                 // Phase 3
+   ntn.SetIslAttribute("MaxIslRange", DoubleValue(5000e3));
    InternetStackHelper().Install(allNodes);
    Ipv4AddressHelper addresses("10.0.0.0", "255.255.255.252");
    ntn.InstallIpLinks(addresses);
@@ -444,6 +494,12 @@ false) and by an ``NS_ABORT_MSG_IF`` in each setter.
 +--------------------------+------------------------------------+------------------+----------------------+-------------------------+
 | MaxAssociationsPerGround | NtnLinkManager                     | 1                | 1 - 4                | count                   |
 +--------------------------+------------------------------------+------------------+----------------------+-------------------------+
+| EnableIsl (Phase 3)      | NtnLinkManager                     | false            | true/false           | bool                    |
++--------------------------+------------------------------------+------------------+----------------------+-------------------------+
+| (MaxIslRange)            | NtnIslModel                        | 5,000,000        | 100,000 - 20,000,000 | m                       |
++--------------------------+------------------------------------+------------------+----------------------+-------------------------+
+| (IslMinClearance)        | NtnIslModel                        | 0                | 0 - 1,000,000        | m                       |
++--------------------------+------------------------------------+------------------+----------------------+-------------------------+
 | (LinkStateSample-        | NtnTraceWriter                     | 0 (every update) | >= 0                 | Time                    |
 | Interval)                |                                    |                  |                      |                         |
 +--------------------------+------------------------------------+------------------+----------------------+-------------------------+
@@ -470,6 +526,10 @@ Traces
   -- -1 means "none".
 * ``GatewayLinkDelayUpdate(uint32_t gatewayId, uint32_t satelliteId, Time delay)`` -- every
   update, for every visible gateway-satellite pair.
+* ``IslStateChange(uint32_t satelliteA, uint32_t satelliteB, bool up)`` -- an ISL became possible
+  or was lost (satelliteA < satelliteB).
+* ``IslDelayUpdate(uint32_t satelliteA, uint32_t satelliteB, Time delay)`` -- every update, for
+  every ISL that is up.
 
 Output files (``NtnHelper::EnableTracing``):
 
@@ -489,6 +549,10 @@ Output files (``NtnHelper::EnableTracing``):
 * With gateways the link-state CSV also has one row per gateway-satellite pair after the ground
   rows; ``ground_id`` then holds the gateway node ID and ``associated`` = 1 means the satellite
   uses that gateway. Without gateways the files are exactly as in Phase 1.
+* ``IslStateChange`` event-log rows: node = satelliteA, peer = satelliteB, value1/value2 =
+  distance_km/clearance_km, detail = up / down.
+* ISL CSV (4th argument of ``EnableTracing``, same sample interval), one row per ISL that is up:
+  ``time_s,satellite_a,satellite_b,distance_km,clearance_km,delay_ms``.
 
 Queries: see "API for other modules" below.
 
@@ -530,6 +594,13 @@ reports state.
 | ``GetEndToEndPath(groundId)``                    | ``NtnEndToEndPath``: satellite, gateway, both  |
 |                                                  | hop delays, total, available                   |
 +--------------------------------------------------+------------------------------------------------+
+| ``GetIslState(a, b)`` / ``GetIslStates()``       | ``NtnIslState``: distance, clearance,          |
+|                                                  | delay, up (Phase 3)                            |
++--------------------------------------------------+------------------------------------------------+
+| ``GetIslNeighbours(satelliteId)``                | satellites with an ISL that is up              |
++--------------------------------------------------+------------------------------------------------+
+| ``GetIslLinkState(a, b)``                        | ISL as common ``LinkState``                    |
++--------------------------------------------------+------------------------------------------------+
 | ``GetAssociationChangeCount`` / ``GetHandover-`` | counters per terminal / per satellite          |
 | ``Count`` / ``GetGatewayChangeCount``            |                                                |
 +--------------------------------------------------+------------------------------------------------+
@@ -538,8 +609,8 @@ reports state.
 are the ``...TracedCallback`` typedefs in ``ntn-link-manager.h``: ``VisibilityChange``,
 ``AssociationChange``, ``SecondaryAssociationChange``, ``SlantRangeUpdate``, ``LinkDelayUpdate``,
 ``GatewayVisibilityChange``, ``GatewayAssociationChange``, ``GatewayLinkDelayUpdate``,
-``UpdateCompleted``. Ordering guarantee: within one update, gateway events come before ground
-events, and when an association trace fires the stored state (``GetPairState``, ``associated``
+``IslStateChange``, ``IslDelayUpdate``, ``UpdateCompleted``. Ordering guarantee: within one
+update, gateway events come first, then ISL events, then ground events, and when an association trace fires the stored state (``GetPairState``, ``associated``
 flags, ``GetEndToEndPath``) already reflects the new decision.
 
 *Decisions* -- to plug in an optimisation/RL policy, derive from ``NtnAssociationPolicy`` and
@@ -553,7 +624,8 @@ and will be swapped for ``futurenet-common`` types when that package is supplied
 
 *Example for M02 (routing):* listen to ``AssociationChange`` and ``GatewayAssociationChange`` to
 update routes, and read ``GetEndToEndPath(g).totalDelay`` as the current access delay of terminal
-g.
+g. With ISLs, build the satellite graph from ``GetIslStates()`` (edges that are ``up``, weight
+``linkDelay``) or keep it current with ``IslStateChange`` / ``IslDelayUpdate``.
 
 Extension points
 ================
@@ -583,7 +655,11 @@ Examples
   sending UDP echo requests to the gateway service address (terminal -> satellite -> gateway and
   back), FlowMonitor for both directions; ``--policy=highest|sticky``, ``--maxAssociations``,
   ``--numPlanes``, ``--walkerF``, ``--numGateways``, region options.
-* ``ntn-validation`` -- validation cases V1-V4 (below).
+* ``ntn-example-isl`` -- the same Walker constellation with ISLs: per-minute table of ISLs up,
+  neighbours per satellite, terminals with a direct gateway path and with a gateway reachable
+  through ISLs (shortest-delay search inside the example); ``--maxIslRangeKm``,
+  ``--islMinClearanceKm``; writes the ISL CSV and event log.
+* ``ntn-validation`` -- validation cases V1-V5 (below).
 
 Common command-line options: ``--numGround``, ``--numSats``, ``--altitudeKm``,
 ``--inclinationDeg``, ``--minElevationDeg``, ``--updateInterval``, ``--dataRate``,
@@ -625,12 +701,18 @@ closed-form result where one exists. Raw results are in ``doc/validation/`` toge
   lower mean delay (at one altitude the highest satellite is always the nearest), coverage is
   identical. PASS. In a sparse constellation (24 satellites, 47 % coverage) both policies made the
   same 24 handovers -- terminals rarely see two satellites, so there is nothing to choose.
+* **V5 inter-satellite links (Phase 3)** -- (a) 12 satellites on one 600 km ring: neighbour
+  distance 3,608.455 km = :math:`2a\sin 15^\circ`, link delay 13.0365 ms = distance / c + 1 ms,
+  largest error 0.31 ns. (b) Walker 120/10/1 with unlimited range for 1 h: in all 404,850 "up"
+  samples and every "down" sample the ISL state equals "the line clears the Earth" (0
+  inconsistent), and the longest ISL, 5,658.68 km, lies just below the line-of-sight limit
+  :math:`2\sqrt{a^2-R^2}` = 5,658.69 km. PASS.
 
 Testing
 *******
 
-``./test.py -s futurenet-ntn`` runs 16 test cases (all QUICK); the first 11 are the unchanged
-Phase 1 cases:
+``./test.py -s futurenet-ntn`` runs 17 test cases (all QUICK); the first 11 are the unchanged
+Phase 1 cases, then 5 Phase 2 cases and 1 Phase 3 case:
 
 * T1 construction and SRS default values
 * T2 / M01-T02 invalid attribute values rejected, boundaries accepted
@@ -650,3 +732,6 @@ Phase 1 cases:
 * T3 ``StickyAssociationPolicy`` rules and a scripted two-satellite pass vs the baseline
 * T1 T3 T4 M01-FR-11 gateway choice, end-to-end delay, traces and output rows
 * T6 M01-FR-11 UDP packets ground -> satellite -> gateway and back with exact arrival times
+* T1-T4 M01-FR-12 ISL defaults/range checks, clearance vs hand-computed geometry (incl. the
+  segment end-point case), manager state and neighbours, drop times by range (5,519 s) and by
+  Earth blocking (7,825 s), event-log and ISL CSV rows

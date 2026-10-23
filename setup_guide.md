@@ -162,15 +162,17 @@ module with all cores on an 8 GB machine — the `--enable-modules` list below k
 contrib/futurenet-ntn/tools/run-checks.sh
 ```
 
-It configures, builds, runs the test suite, the clang-format check, all three examples and all
-validation cases (about 30 s after the first build). Expected highlights:
+It configures, builds, runs the test suite, the clang-format check, all four examples and all
+validation cases (about 35 s after the first build). Expected highlights:
 
 ```text
 1 of 1 tests passed (1 passed, 0 skipped, 0 failed, 0 crashed, 0 valgrind errors)
 - No files detected with bad code formatting
 Total association changes: 68, total handovers: 48
 Terminal association changes: 124, handovers: 104, satellite gateway changes: 32
+Terminal samples: covered 100.0 %, direct gateway path 92.2 %, gateway reachable with ISLs 100.0 %
 V4 ns3::StickyAssociationPolicy: 299 handovers, mean elevation 24.91 deg, mean delay 5.479 ms
+V5b longest ISL 5658.7 km (line-of-sight limit 5658.7 km), 0 inconsistent of 404850 up samples
 ALL VALIDATION CASES PASSED
 All checks finished. Example outputs are in ntn-output/
 ```
@@ -192,6 +194,7 @@ mkdir -p demo
 ./ns3 run --cwd=demo "ntn-example-advanced --numGround=20 --numSats=12"    # 20 x 12 demo
 ./ns3 run --cwd=demo ntn-example-constellation                             # Phase 2: planes + gateways
 ./ns3 run --cwd=demo "ntn-example-constellation --policy=sticky --maxAssociations=2"
+./ns3 run --cwd=demo ntn-example-isl                                       # Phase 3: ISLs
 ./ns3 run "ntn-validation --outputDir=contrib/futurenet-ntn/doc/validation"
 
 python3 utils/check-style-clang-format.py contrib/futurenet-ntn           # style check
@@ -250,6 +253,8 @@ results you want to submit, so the run-info files record the new commit ID.
 | `Invalid value for attribute set (OrbitAltitude)` | value outside the project range | Expected behaviour (input validation); use 200–2000 km. |
 | `... satellites cannot be divided equally between ... orbital planes` | `numSats` is not a multiple of `numPlanes` | Expected; e.g. 120 satellites with 2, 3, 4, 5, 6, 8, 10, 12, 15 or 20 planes. |
 | `Gateways are disabled; ...` | `InstallGateway()` before `SetLinkAttribute("EnableGateway", BooleanValue(true))` | Enable gateways first. |
+| `No ISL state for satellites ...` | `GetIslState()` without `EnableIsl` or before the first update | `SetLinkAttribute("EnableIsl", BooleanValue(true))` and query after `Start()` has run an update. |
+| A simulation with ISLs is slow | ISL checks are O(S²/2) per update (7,140 pairs for 120 satellites) | Use a larger `--updateInterval` (e.g. 1 s) when no packet timing depends on it. |
 | Test program ends with `SIGSEGV` instead of `FAIL` | a test indexes a result list after a failed check (ns-3 keeps running after a failed assert) | Find the line: `apt-get install -y gdb` in the container, then `LD_LIBRARY_PATH=build/lib gdb -batch -ex run -ex bt --args build/utils/ns3.46.1-test-runner-default --suite=futurenet-ntn`. |
 | `git push` asks for a password / is rejected | not logged in to GitHub, or no write access to the team repository | `gh auth login` (GitHub CLI) or a personal access token; ask the repository owner for access. |
 
