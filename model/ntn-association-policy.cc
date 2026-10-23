@@ -15,6 +15,7 @@ NS_LOG_COMPONENT_DEFINE("NtnAssociationPolicy");
 
 NS_OBJECT_ENSURE_REGISTERED(NtnAssociationPolicy);
 NS_OBJECT_ENSURE_REGISTERED(HighestElevationPolicy);
+NS_OBJECT_ENSURE_REGISTERED(StickyAssociationPolicy);
 
 TypeId
 NtnAssociationPolicy::GetTypeId()
@@ -76,6 +77,88 @@ HighestElevationPolicy::Select(const NtnAssociationState& state)
         else
         {
             decision.secondarySatelliteIds.push_back(ranked[i].satelliteId);
+        }
+    }
+    return decision;
+}
+
+TypeId
+StickyAssociationPolicy::GetTypeId()
+{
+    static TypeId tid = TypeId("ns3::StickyAssociationPolicy")
+                            .SetParent<NtnAssociationPolicy>()
+                            .SetGroupName("FuturenetNtn")
+                            .AddConstructor<StickyAssociationPolicy>();
+    return tid;
+}
+
+StickyAssociationPolicy::StickyAssociationPolicy()
+{
+    NS_LOG_FUNCTION(this);
+}
+
+StickyAssociationPolicy::~StickyAssociationPolicy()
+{
+    NS_LOG_FUNCTION(this);
+}
+
+NtnAssociationDecision
+StickyAssociationPolicy::Select(const NtnAssociationState& state)
+{
+    NS_LOG_FUNCTION(this << state.groundId << state.visibleCandidates.size());
+    NtnAssociationDecision decision;
+    const std::vector<NtnCandidate> ranked = RankByElevation(state.visibleCandidates);
+    if (ranked.empty())
+    {
+        return decision;
+    }
+    auto isVisible = [&ranked](int64_t satelliteId) {
+        return std::any_of(ranked.begin(), ranked.end(), [satelliteId](const NtnCandidate& c) {
+            return static_cast<int64_t>(c.satelliteId) == satelliteId;
+        });
+    };
+    auto isCurrentSecondary = [&state](uint32_t satelliteId) {
+        return std::find(state.currentSecondarySatelliteIds.begin(),
+                         state.currentSecondarySatelliteIds.end(),
+                         satelliteId) != state.currentSecondarySatelliteIds.end();
+    };
+
+    // 1. Primary. `ranked` is in elevation order, so the first current secondary found in it is
+    //    the highest one.
+    if (state.currentSatelliteId != ntn::NO_SATELLITE && isVisible(state.currentSatelliteId))
+    {
+        decision.satelliteId = state.currentSatelliteId;
+    }
+    else
+    {
+        auto promoted = std::find_if(ranked.begin(), ranked.end(), [&](const NtnCandidate& c) {
+            return isCurrentSecondary(c.satelliteId);
+        });
+        decision.satelliteId = static_cast<int32_t>(
+            promoted != ranked.end() ? promoted->satelliteId : ranked.front().satelliteId);
+    }
+
+    // 2. Secondary: still-visible current ones first, then the highest of the rest.
+    const std::size_t freePlaces = state.maxAssociations > 0 ? state.maxAssociations - 1 : 0;
+    for (const auto& candidate : ranked)
+    {
+        if (decision.secondarySatelliteIds.size() < freePlaces &&
+            static_cast<int32_t>(candidate.satelliteId) != decision.satelliteId &&
+            isCurrentSecondary(candidate.satelliteId))
+        {
+            decision.secondarySatelliteIds.push_back(candidate.satelliteId);
+        }
+    }
+    for (const auto& candidate : ranked)
+    {
+        const bool chosen =
+            static_cast<int32_t>(candidate.satelliteId) == decision.satelliteId ||
+            std::find(decision.secondarySatelliteIds.begin(),
+                      decision.secondarySatelliteIds.end(),
+                      candidate.satelliteId) != decision.secondarySatelliteIds.end();
+        if (decision.secondarySatelliteIds.size() < freePlaces && !chosen)
+        {
+            decision.secondarySatelliteIds.push_back(candidate.satelliteId);
         }
     }
     return decision;
