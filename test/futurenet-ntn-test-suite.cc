@@ -1082,6 +1082,188 @@ class NtnWalkerConstellationTestCase : public TestCase
 
 /**
  * @ingroup futurenet-ntn-tests
+ * T1 / T2 / T3 / T4 for MaxAssociationsPerGround: default 1, range 1 - 4, the policy fills the
+ * extra associations by elevation, the trace fires for added/removed secondary satellites, and
+ * the IP links stay consistent with the association set at every update.
+ */
+class NtnMultiAssociationTestCase : public TestCase
+{
+  public:
+    NtnMultiAssociationTestCase()
+        : TestCase("T1 T2 T3 T4 MaxAssociationsPerGround keeps up to 4 satellites associated")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        // T1 / T2
+        Ptr<NtnLinkManager> manager = CreateObject<NtnLinkManager>();
+        UintegerValue max;
+        manager->GetAttribute("MaxAssociationsPerGround", max);
+        NS_TEST_ASSERT_MSG_EQ(max.Get(), 1, "MaxAssociationsPerGround default must be 1 (SRS)");
+        NS_TEST_EXPECT_MSG_EQ(
+            manager->SetAttributeFailSafe("MaxAssociationsPerGround", UintegerValue(0)),
+            false,
+            "0 rejected");
+        NS_TEST_EXPECT_MSG_EQ(
+            manager->SetAttributeFailSafe("MaxAssociationsPerGround", UintegerValue(5)),
+            false,
+            "5 rejected");
+        NS_TEST_EXPECT_MSG_EQ(
+            manager->SetAttributeFailSafe("MaxAssociationsPerGround", UintegerValue(4)),
+            true,
+            "4 accepted");
+
+        // T3 policy: 4 candidates, 3 allowed -> primary = highest, secondary = next two.
+        Ptr<HighestElevationPolicy> policy = CreateObject<HighestElevationPolicy>();
+        NtnAssociationState state;
+        state.maxAssociations = 3;
+        state.visibleCandidates = {{5, 20.0, 1.5e6, Time(0)},
+                                   {3, 60.0, 0.7e6, Time(0)},
+                                   {9, 45.0, 0.9e6, Time(0)},
+                                   {2, 30.0, 1.1e6, Time(0)}};
+        NtnAssociationDecision decision = policy->Select(state);
+        NS_TEST_ASSERT_MSG_EQ(decision.satelliteId, 3, "primary = highest elevation");
+        NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds.size(), 2, "two secondary");
+        NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds[0], 9, "second highest");
+        NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds[1], 2, "third highest");
+        state.maxAssociations = 1;
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).secondarySatelliteIds.size(),
+                              0,
+                              "max 1 -> no secondary (Phase 1 behaviour)");
+
+        // T3 / T4 in the manager: equatorial satellites 2, 8 and 10 deg away from a terminal at
+        // (0, 0) are all visible (limit 15.8 deg at 600 km / 10 deg elevation).
+        Ptr<Node> ground = CreateGroundNode(0.0, 0.0);
+        Ptr<Node> near = CreateSatelliteNode(0.0, 2.0);
+        Ptr<Node> middle = CreateSatelliteNode(0.0, 8.0);
+        Ptr<Node> far = CreateSatelliteNode(0.0, 350.0);
+        const uint32_t g = ground->GetId();
+        manager = CreateObject<NtnLinkManager>();
+        manager->SetMaxAssociationsPerGround(2);
+        manager->AddGroundNode(ground);
+        manager->AddSatelliteNode(near);
+        manager->AddSatelliteNode(middle);
+        manager->AddSatelliteNode(far);
+        m_secondary.clear();
+        manager->TraceConnectWithoutContext(
+            "SecondaryAssociationChange",
+            MakeCallback(&NtnMultiAssociationTestCase::OnSecondary, this));
+        manager->Update();
+        const std::vector<uint32_t> associated = manager->GetAssociatedSatellites(g);
+        NS_TEST_ASSERT_MSG_EQ(associated.size(), 2, "two associations");
+        NS_TEST_ASSERT_MSG_EQ(associated[0], near->GetId(), "primary first");
+        NS_TEST_ASSERT_MSG_EQ(associated[1], middle->GetId(), "then the secondary");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetAssociatedSatellite(g),
+                              static_cast<int32_t>(near->GetId()),
+                              "GetAssociatedSatellite returns the primary");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetLinkState(g, middle->GetId()).available,
+                              true,
+                              "secondary link is available");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetLinkState(g, far->GetId()).available,
+                              false,
+                              "third satellite is not associated");
+        NS_TEST_ASSERT_MSG_EQ(m_secondary.size(), 1, "one secondary added");
+        NS_TEST_ASSERT_MSG_EQ(m_secondary[0].first, middle->GetId(), "trace satellite ID");
+        NS_TEST_ASSERT_MSG_EQ(m_secondary[0].second, true, "trace: added");
+        manager->Update();
+        NS_TEST_ASSERT_MSG_EQ(m_secondary.size(), 1, "no change -> no trace");
+        manager->SetMaxAssociationsPerGround(1);
+        manager->Update();
+        NS_TEST_ASSERT_MSG_EQ(m_secondary.size(), 2, "secondary removed");
+        NS_TEST_ASSERT_MSG_EQ(m_secondary[1].second, false, "trace: removed");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetAssociatedSatellites(g).size(), 1, "back to one");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetAssociationChangeCount(g),
+                              1,
+                              "secondary changes are not primary association changes");
+        Simulator::Destroy();
+
+        // IP links follow the association set: 4 terminals, 24 satellites (15 deg apart, so 2 or
+        // 3 are in view at any time), up to 3 links each.
+        NodeContainer sats;
+        sats.Create(24);
+        NodeContainer grounds;
+        grounds.Create(4);
+        NtnHelper ntn;
+        ntn.SetLinkAttribute("MaxAssociationsPerGround", UintegerValue(3));
+        ntn.SetLinkAttribute("UpdateInterval", TimeValue(Seconds(1)));
+        ntn.InstallSatellites(sats);
+        for (uint32_t k = 0; k < grounds.GetN(); ++k)
+        {
+            const auto [lat, lon] = NtnHelper::GetGroundTrackPoint(k * 90.0, 1.0, 53.0, 0.0);
+            ntn.InstallGroundTerminal(grounds.Get(k), lat, lon);
+        }
+        InternetStackHelper internet;
+        internet.Install(sats);
+        internet.Install(grounds);
+        Ipv4AddressHelper addresses("10.0.0.0", "255.255.255.252");
+        ntn.InstallIpLinks(addresses);
+        m_helper = &ntn;
+        m_inconsistentLinks = 0;
+        m_maxAssociated = 0;
+        m_secondary.clear();
+        ntn.GetLinkManager()->TraceConnectWithoutContext(
+            "UpdateCompleted",
+            MakeCallback(&NtnMultiAssociationTestCase::OnUpdate, this));
+        ntn.GetLinkManager()->TraceConnectWithoutContext(
+            "SecondaryAssociationChange",
+            MakeCallback(&NtnMultiAssociationTestCase::OnSecondary, this));
+        ntn.Start();
+        Simulator::Stop(Seconds(1200));
+        Simulator::Run();
+        Simulator::Destroy();
+        m_helper = nullptr;
+
+        NS_TEST_ASSERT_MSG_EQ(m_inconsistentLinks, 0, "link up <=> pair associated");
+        NS_TEST_ASSERT_MSG_EQ(m_maxAssociated, 3, "terminals reach 3 associations");
+        NS_TEST_ASSERT_MSG_GT(m_secondary.size(), 0, "secondary set changes over time");
+    }
+
+    /**
+     * SecondaryAssociationChange sink.
+     * @param groundId ground ID
+     * @param satelliteId satellite ID
+     * @param associated added or removed
+     */
+    void OnSecondary(uint32_t groundId, uint32_t satelliteId, bool associated)
+    {
+        m_secondary.emplace_back(satelliteId, associated);
+    }
+
+    /**
+     * UpdateCompleted sink: every IP link must be up exactly when its pair is associated, and
+     * no terminal may exceed MaxAssociationsPerGround.
+     * @param now update time
+     */
+    void OnUpdate(Time now)
+    {
+        Ptr<NtnLinkManager> manager = m_helper->GetLinkManager();
+        Ptr<NtnIpLinkController> controller = m_helper->GetIpLinkController();
+        for (const auto& pair : manager->GetPairStates())
+        {
+            if (controller->IsLinkUp(pair.groundId, pair.satelliteId) != pair.associated)
+            {
+                ++m_inconsistentLinks;
+            }
+        }
+        const NodeContainer grounds = manager->GetGroundNodes();
+        for (auto it = grounds.Begin(); it != grounds.End(); ++it)
+        {
+            const auto n =
+                static_cast<uint32_t>(manager->GetAssociatedSatellites((*it)->GetId()).size());
+            m_maxAssociated = std::max(m_maxAssociated, n);
+        }
+    }
+
+    std::vector<std::pair<uint32_t, bool>> m_secondary; //!< SecondaryAssociationChange arguments
+    NtnHelper* m_helper{nullptr};                       //!< Helper of the running scenario
+    uint32_t m_inconsistentLinks{0};                    //!< Link state != association state
+    uint32_t m_maxAssociated{0};                        //!< Most associations seen at once
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
  * The futurenet-ntn test suite.
  */
 class FuturenetNtnTestSuite : public TestSuite
@@ -1102,6 +1284,7 @@ class FuturenetNtnTestSuite : public TestSuite
         AddTestCase(new NtnIntegrationTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnValidationScenarioTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnWalkerConstellationTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnMultiAssociationTestCase, TestCase::Duration::QUICK);
     }
 };
 

@@ -28,10 +28,13 @@ namespace ns3
  * - LinkDelayUpdate: sets that link's channel Delay to the newly computed delay, so packets
  *   sent from now on experience the current geometry;
  * - AssociationChange: brings the IPv4 interfaces of the old link down and of the new link up
- *   (on both ends), and moves the ground terminal's default route to the new satellite.
+ *   (on both ends), and moves the ground terminal's default route to the new satellite;
+ * - SecondaryAssociationChange: brings a secondary satellite's link up or down. Secondary links
+ *   carry traffic addressed to that satellite's link address, but the default route always uses
+ *   the primary satellite.
  *
- * All links start down; a link only carries traffic while its ground terminal is associated
- * with that satellite.
+ * All links start down; a link is only up while its ground terminal is associated (as primary
+ * or secondary) with that satellite.
  */
 class NtnIpLinkController : public Object
 {
@@ -110,6 +113,21 @@ class NtnIpLinkController : public Object
     void HandleAssociationChange(uint32_t groundId, int32_t oldSatelliteId, int32_t newSatelliteId);
 
     /**
+     * SecondaryAssociationChange handler.
+     * @param groundId ground terminal node ID
+     * @param satelliteId satellite node ID
+     * @param associated true if the satellite became a secondary association
+     */
+    void HandleSecondaryAssociationChange(uint32_t groundId, uint32_t satelliteId, bool associated);
+
+    /**
+     * @param groundId ground terminal node ID
+     * @param satelliteId satellite node ID
+     * @return true if the link manager currently has the pair associated (primary or secondary)
+     */
+    bool IsAssociated(uint32_t groundId, uint32_t satelliteId) const;
+
+    /**
      * @param groundId ground terminal node ID
      * @param satelliteId satellite node ID
      * @return the registered link (aborts if unknown)
@@ -122,6 +140,14 @@ class NtnIpLinkController : public Object
      * @param up true for up, false for down
      */
     static void SetLinkUp(const IpLink& link, bool up);
+
+    /**
+     * Bring one IPv4 interface up or down; does nothing if it is already in that state.
+     * @param ipv4 the IPv4 stack
+     * @param interface interface index
+     * @param up true for up, false for down
+     */
+    static void SetInterfaceUp(Ptr<Ipv4> ipv4, uint32_t interface, bool up);
 
     std::map<std::pair<uint32_t, uint32_t>, IpLink> m_links; //!< Links by (ground, satellite)
     Ptr<NtnLinkManager> m_manager;                           //!< Manager being followed
