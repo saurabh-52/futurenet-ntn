@@ -1,0 +1,3 @@
+policy,handovers,association_changes,coverage_fraction,mean_elevation_deg,mean_delay_ms
+ns3::HighestElevationPolicy,336,370,0.999861,30.933838,4.926740
+ns3::StickyAssociationPolicy,299,333,0.999861,24.913028,5.478796
