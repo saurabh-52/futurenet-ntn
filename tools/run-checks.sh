@@ -30,6 +30,7 @@ mkdir -p "${OUT}"
 ./ns3 run --no-build --cwd="${OUT}" ntn-example-basic | tail -8
 ./ns3 run --no-build --cwd="${OUT}" "ntn-example-advanced --numGround=20 --numSats=12" | tail -4
 ./ns3 run --no-build --cwd="${OUT}" ntn-example-constellation | tail -5
+./ns3 run --no-build --cwd="${OUT}" ntn-example-isl | tail -4
 
 step "6/6 validation"
 mkdir -p "${VALIDATION}"

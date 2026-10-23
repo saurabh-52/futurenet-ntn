@@ -64,6 +64,13 @@ NtnLinkManager::GetTypeId()
                           MakeBooleanAccessor(&NtnLinkManager::SetEnableGateway,
                                               &NtnLinkManager::GetEnableGateway),
                           MakeBooleanChecker())
+            .AddAttribute(
+                "EnableIsl",
+                "Evaluate inter-satellite links between every satellite pair each "
+                "update (SRS M01-FR-12); see NtnIslModel for the rule.",
+                BooleanValue(false),
+                MakeBooleanAccessor(&NtnLinkManager::SetEnableIsl, &NtnLinkManager::GetEnableIsl),
+                MakeBooleanChecker())
             .AddTraceSource("VisibilityChange",
                             "A satellite became visible or invisible from a ground terminal.",
                             MakeTraceSourceAccessor(&NtnLinkManager::m_visibilityChangeTrace),
@@ -107,7 +114,17 @@ NtnLinkManager::GetTypeId()
                 "One-way delay of a visible satellite-gateway link (gatewayId, satelliteId, "
                 "delay), reported every update.",
                 MakeTraceSourceAccessor(&NtnLinkManager::m_gatewayLinkDelayUpdateTrace),
-                "ns3::NtnLinkManager::LinkDelayUpdateTracedCallback");
+                "ns3::NtnLinkManager::LinkDelayUpdateTracedCallback")
+            .AddTraceSource("IslStateChange",
+                            "An inter-satellite link became possible (true) or was lost (false) "
+                            "(satelliteA < satelliteB).",
+                            MakeTraceSourceAccessor(&NtnLinkManager::m_islStateChangeTrace),
+                            "ns3::NtnLinkManager::IslStateChangeTracedCallback")
+            .AddTraceSource("IslDelayUpdate",
+                            "One-way delay of an ISL that is up (satelliteA, satelliteB, delay), "
+                            "reported every update.",
+                            MakeTraceSourceAccessor(&NtnLinkManager::m_islDelayUpdateTrace),
+                            "ns3::NtnLinkManager::LinkDelayUpdateTracedCallback");
     return tid;
 }
 
@@ -115,10 +132,12 @@ NtnLinkManager::NtnLinkManager()
     : m_visibility(CreateObject<NtnVisibilityModel>()),
       m_delay(CreateObject<NtnPropagationDelayModel>()),
       m_policy(CreateObject<HighestElevationPolicy>()),
+      m_isl(CreateObject<NtnIslModel>()),
       m_updateInterval(MilliSeconds(ntn::DEFAULT_UPDATE_INTERVAL_MS)),
       m_dataRate(ntn::DEFAULT_DATA_RATE_BPS),
       m_maxAssociations(ntn::DEFAULT_ASSOCIATIONS_PER_GROUND),
-      m_enableGateway(false)
+      m_enableGateway(false),
+      m_enableIsl(false)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -139,7 +158,9 @@ NtnLinkManager::DoDispose()
     m_gateways.clear();
     m_gatewayPairs.clear();
     m_satelliteGateways.clear();
+    m_islPairs.clear();
     m_visibility = nullptr;
+    m_isl = nullptr;
     m_delay = nullptr;
     m_policy = nullptr;
     Object::DoDispose();
@@ -377,6 +398,32 @@ NtnLinkManager::GetEnableGateway() const
 }
 
 void
+NtnLinkManager::SetEnableIsl(bool enable)
+{
+    NS_LOG_FUNCTION(this << enable);
+    m_enableIsl = enable;
+}
+
+bool
+NtnLinkManager::GetEnableIsl() const
+{
+    return m_enableIsl;
+}
+
+void
+NtnLinkManager::SetIslModel(Ptr<NtnIslModel> model)
+{
+    NS_ABORT_MSG_IF(!model, "ISL model must not be null");
+    m_isl = model;
+}
+
+Ptr<NtnIslModel>
+NtnLinkManager::GetIslModel() const
+{
+    return m_isl;
+}
+
+void
 NtnLinkManager::Start()
 {
     NS_LOG_FUNCTION(this);
@@ -417,6 +464,10 @@ NtnLinkManager::Update()
     if (!m_gateways.empty())
     {
         UpdateGateways(satellitePositionsM);
+    }
+    if (m_enableIsl)
+    {
+        UpdateIsls(satellitePositionsM);
     }
 
     for (auto& ground : m_grounds)
@@ -535,6 +586,47 @@ NtnLinkManager::UpdateGateways(const std::vector<Vector>& satellitePositionsM)
         NS_LOG_INFO("t=" << now.As(Time::S) << " satellite " << satelliteId << " gateway "
                          << oldGateway << " -> " << bestGateway);
         m_gatewayAssociationChangeTrace(satelliteId, oldGateway, bestGateway);
+    }
+}
+
+void
+NtnLinkManager::UpdateIsls(const std::vector<Vector>& satellitePositionsM)
+{
+    const Time now = Simulator::Now();
+    // Every unordered pair once: O(S^2 / 2) per update.
+    for (std::size_t i = 0; i < m_satellites.size(); ++i)
+    {
+        for (std::size_t j = i + 1; j < m_satellites.size(); ++j)
+        {
+            uint32_t idA = m_satellites[i].node->GetId();
+            uint32_t idB = m_satellites[j].node->GetId();
+            if (idA > idB)
+            {
+                std::swap(idA, idB);
+            }
+            NtnIslState& isl = m_islPairs[{idA, idB}];
+            isl.satelliteA = idA;
+            isl.satelliteB = idB;
+            isl.distanceM = CalculateDistance(satellitePositionsM[i], satellitePositionsM[j]);
+            isl.clearanceM =
+                NtnIslModel::ComputeLineClearanceM(satellitePositionsM[i], satellitePositionsM[j]);
+            isl.propagationDelay = m_delay->GetPropagationDelay(isl.distanceM);
+            isl.linkDelay = m_delay->GetLinkDelay(isl.distanceM);
+
+            const bool up = m_isl->IsLinkPossible(isl.distanceM, isl.clearanceM);
+            if (up != isl.up)
+            {
+                isl.up = up;
+                NS_LOG_INFO("t=" << now.As(Time::S) << " ISL " << idA << "-" << idB
+                                 << (up ? " up" : " down") << " (distance " << isl.distanceM
+                                 << " m, clearance " << isl.clearanceM << " m)");
+                m_islStateChangeTrace(idA, idB, up);
+            }
+            if (up)
+            {
+                m_islDelayUpdateTrace(idA, idB, isl.linkDelay);
+            }
+        }
     }
 }
 
@@ -853,6 +945,64 @@ NtnLinkManager::GetEndToEndPath(uint32_t groundNodeId) const
     path.totalDelay = path.groundLinkDelay + path.gatewayLinkDelay;
     path.available = true;
     return path;
+}
+
+NtnIslState
+NtnLinkManager::GetIslState(uint32_t satelliteA, uint32_t satelliteB) const
+{
+    auto it = m_islPairs.find({std::min(satelliteA, satelliteB), std::max(satelliteA, satelliteB)});
+    NS_ABORT_MSG_IF(it == m_islPairs.end(),
+                    "No ISL state for satellites " << satelliteA << "/" << satelliteB
+                                                   << " (enable EnableIsl and run an update)");
+    return it->second;
+}
+
+std::vector<NtnIslState>
+NtnLinkManager::GetIslStates() const
+{
+    std::vector<NtnIslState> states;
+    states.reserve(m_islPairs.size());
+    for (const auto& [key, isl] : m_islPairs)
+    {
+        states.push_back(isl);
+    }
+    return states;
+}
+
+std::vector<uint32_t>
+NtnLinkManager::GetIslNeighbours(uint32_t satelliteNodeId) const
+{
+    std::vector<uint32_t> neighbours;
+    for (const auto& [key, isl] : m_islPairs)
+    {
+        if (isl.up && key.first == satelliteNodeId)
+        {
+            neighbours.push_back(key.second);
+        }
+        else if (isl.up && key.second == satelliteNodeId)
+        {
+            neighbours.push_back(key.first);
+        }
+    }
+    std::sort(neighbours.begin(), neighbours.end());
+    return neighbours;
+}
+
+NtnLinkState
+NtnLinkManager::GetIslLinkState(uint32_t satelliteA, uint32_t satelliteB) const
+{
+    const NtnIslState isl = GetIslState(satelliteA, satelliteB);
+    constexpr double BITS_PER_MBIT = 1e6;
+    constexpr double MS_PER_S = 1e3;
+    NtnLinkState state;
+    state.sourceNodeId = satelliteA;
+    state.destinationNodeId = satelliteB;
+    state.available = isl.up;
+    state.dataRateMbps = static_cast<double>(m_dataRate.GetBitRate()) / BITS_PER_MBIT;
+    state.propagationDelayMs = isl.up ? isl.propagationDelay.GetSeconds() * MS_PER_S
+                                      : std::numeric_limits<double>::quiet_NaN();
+    state.lossRatio = 0.0;
+    return state;
 }
 
 } // namespace ns3

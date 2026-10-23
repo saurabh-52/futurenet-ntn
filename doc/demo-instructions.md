@@ -9,7 +9,7 @@ a shell in the container: `docker exec -it ntn-dev bash` (see `README.md` for cr
 contrib/futurenet-ntn/tools/run-checks.sh
 ```
 
-Runs configure, build, the test suite, the style check, all three examples and all validation
+Runs configure, build, the test suite, the style check, all four examples and all validation
 cases. Expected last line: `All checks finished. Example outputs are in ntn-output/`.
 
 ## 1. Build
@@ -29,8 +29,8 @@ Expected: build finishes without errors or warnings from `contrib/futurenet-ntn`
 ./build/utils/ns3.46.1-test-runner-default --test-name=futurenet-ntn --verbose   # per test case
 ```
 
-Expected: `1 of 1 tests passed`, and 16 test-case lines starting with `PASS` in the verbose run
-(11 Phase 1 + 5 Phase 2).
+Expected: `1 of 1 tests passed`, and 17 test-case lines starting with `PASS` in the verbose run
+(11 Phase 1 + 5 Phase 2 + 1 Phase 3).
 
 ## 3. Basic example — one satellite pass
 
@@ -124,6 +124,34 @@ Show the Phase 2 options without recompiling:
 grep -m3 Gateway demo/ntn-constellation-events.csv    # gateway rows in the common event log
 ```
 
+## 4c. ISL example — inter-satellite links (Phase 3)
+
+```bash
+./ns3 run --cwd=demo ntn-example-isl
+```
+
+Expected (about 5 s), one row per minute, then a summary:
+
+```text
+  time_s  isls_up  neighbours  covered  direct  via_isl
+       0      906      15.10       20      19       20
+...
+Terminal samples: covered 100.0 %, direct gateway path 92.2 %, gateway reachable with ISLs 100.0 %
+Mean end-to-end delay: direct 9.453 ms, best with ISLs 10.263 ms
+ISL events: 1550 up, 646 down
+```
+
+Explain: with ISLs every terminal's satellite can reach a gateway (directly or over neighbours),
+instead of 92 % without; the extra terminals need ISL hops, which is why the mean "best with
+ISLs" delay is a little higher. This is analysis only — the module reports ISLs, a routing
+module would forward over them. Try a short range:
+
+```bash
+./ns3 run --cwd=demo "ntn-example-isl --maxIslRangeKm=1500 --numGateways=1"
+# ~1.4 neighbours per satellite; ISLs no longer add reachability (in-plane neighbours are 3,608 km apart)
+head -3 demo/ntn-isl-links.csv; grep -m2 IslStateChange demo/ntn-isl-events.csv
+```
+
 ## 5. Plot (optional)
 
 ```bash
@@ -139,12 +167,14 @@ satellite over time (handovers are the steps).
 ./ns3 run "ntn-validation --outputDir=contrib/futurenet-ntn/doc/validation"
 ```
 
-Expected: eleven `PASS` lines and `ALL VALIDATION CASES PASSED`; V1 prints
+Expected: thirteen `PASS` lines and `ALL VALIDATION CASES PASSED`; V1 prints
 `link delay 3.001385 ms (closed form 3.001385 ms)`, V4 prints
 
 ```text
 V4 ns3::HighestElevationPolicy: 336 handovers, mean elevation 30.93 deg, mean delay 4.927 ms
 V4 ns3::StickyAssociationPolicy: 299 handovers, mean elevation 24.91 deg, mean delay 5.479 ms
+V5a ring neighbour distance 3608.455 km (closed form 3608.455 km), largest delay error 0.306 ns
+V5b longest ISL 5658.7 km (line-of-sight limit 5658.7 km), 0 inconsistent of 404850 up samples
 ```
 
 ## 7. Reproducibility

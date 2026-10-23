@@ -20,6 +20,10 @@
  *   HighestElevationPolicy and once with StickyAssociationPolicy. Expected: the sticky policy
  *   makes fewer handovers, the baseline has the lower mean delay (at one altitude the highest
  *   satellite is always the nearest), and both give the same coverage.
+ * - V5 (ISLs, Phase 3): (a) neighbours on one ring are 2 a sin(180 deg / N) apart, with delay
+ *   distance / c + processing; (b) with an unlimited ISL range only the Earth limits ISLs: every
+ *   ISL that is up clears the Earth, every one that is down is blocked by it, and the longest
+ *   ISL approaches but never exceeds the line-of-sight limit 2 sqrt(a^2 - R^2).
  *
  * Run: ./ns3 run "ntn-validation --outputDir=contrib/futurenet-ntn/doc/validation"
  */
@@ -483,6 +487,117 @@ RunV4(const std::string& dir)
     return ok;
 }
 
+/**
+ * V5: ISL geometry against closed form.
+ * @param dir output directory
+ * @return true if passed
+ */
+bool
+RunV5(const std::string& dir)
+{
+    std::ofstream out(dir + "/v5-isl.csv");
+    out << std::fixed << std::setprecision(6) << "check,simulated,closed_form,unit\n";
+    const double a = ntn::EARTH_RADIUS_M + ntn::DEFAULT_ORBIT_ALTITUDE_M;
+
+    // (a) 12 satellites on one 600 km ring: neighbours 30 deg apart.
+    constexpr uint32_t RING_SIZE = 12;
+    double ringDistanceErrorM = 0.0;
+    double ringDelayErrorNs = 0.0;
+    {
+        NodeContainer ring;
+        ring.Create(RING_SIZE);
+        NtnHelper ntn;
+        ntn.SetLinkAttribute("EnableIsl", BooleanValue(true));
+        ntn.InstallSatellites(ring);
+        Ptr<NtnLinkManager> manager = ntn.GetLinkManager();
+        manager->Update();
+        const double expectedM = 2 * a * std::sin(M_PI / RING_SIZE);
+        const double expectedDelayS =
+            expectedM / ntn::SPEED_OF_LIGHT_M_PER_S + ntn::DEFAULT_PROCESSING_DELAY_MS / MS_PER_S;
+        for (uint32_t k = 0; k < RING_SIZE; ++k)
+        {
+            const NtnIslState isl =
+                manager->GetIslState(ring.Get(k)->GetId(), ring.Get((k + 1) % RING_SIZE)->GetId());
+            ringDistanceErrorM = std::max(ringDistanceErrorM, std::abs(isl.distanceM - expectedM));
+            ringDelayErrorNs =
+                std::max(ringDelayErrorNs,
+                         std::abs(isl.linkDelay.GetSeconds() - expectedDelayS) * NS_PER_S);
+        }
+        const NtnIslState first = manager->GetIslState(ring.Get(0)->GetId(), ring.Get(1)->GetId());
+        out << "ring_neighbour_distance," << first.distanceM / M_PER_KM << ','
+            << expectedM / M_PER_KM << ",km\n"
+            << "ring_neighbour_delay," << first.linkDelay.GetSeconds() * MS_PER_S << ','
+            << expectedDelayS * MS_PER_S << ",ms\n";
+        std::cout << "V5a ring neighbour distance " << std::fixed << std::setprecision(3)
+                  << first.distanceM / M_PER_KM << " km (closed form " << expectedM / M_PER_KM
+                  << " km), largest delay error " << ringDelayErrorNs << " ns\n";
+        Simulator::Destroy();
+    }
+    bool ok = Verdict("V5a ring ISL distance and delay match closed form",
+                      ringDistanceErrorM < 1e-3 && ringDelayErrorNs <= DELAY_TOLERANCE_NS);
+
+    // (b) Walker 53 deg: 120 / 10 / 1, unlimited range, one hour, 10 s updates.
+    constexpr uint32_t NUM_SATS = 120;
+    constexpr uint32_t NUM_PLANES = 10;
+    const double losLimitM = 2 * std::sqrt(a * a - ntn::EARTH_RADIUS_M * ntn::EARTH_RADIUS_M);
+
+    struct
+    {
+        uint64_t upSamples{0};    //!< (pair, update) samples with the ISL up
+        uint64_t inconsistent{0}; //!< up but blocked, or down but clear
+        double longestUpM{0.0};   //!< Longest ISL that was up
+    } stats;
+
+    {
+        NodeContainer sats;
+        sats.Create(NUM_SATS);
+        NtnHelper ntn;
+        ntn.SetConstellationAttribute("NumOrbitalPlanes", UintegerValue(NUM_PLANES));
+        ntn.SetConstellationAttribute("PlanePhaseOffset",
+                                      DoubleValue(ntn::FULL_CIRCLE_DEG / NUM_SATS));
+        ntn.SetLinkAttribute("EnableIsl", BooleanValue(true));
+        ntn.SetLinkAttribute("UpdateInterval", TimeValue(Seconds(10)));
+        ntn.SetIslAttribute("MaxIslRange", DoubleValue(ntn::MAX_ISL_RANGE_M));
+        ntn.InstallSatellites(sats);
+        Ptr<NtnLinkManager> manager = ntn.GetLinkManager();
+        manager->TraceConnectWithoutContext(
+            "UpdateCompleted",
+            MakeCallback(+[](NtnLinkManager* m, decltype(stats)* s, Time) {
+                for (const auto& isl : m->GetIslStates())
+                {
+                    const bool clear = isl.clearanceM >= 0.0;
+                    if (isl.up != clear)
+                    {
+                        ++s->inconsistent;
+                    }
+                    if (isl.up)
+                    {
+                        ++s->upSamples;
+                        s->longestUpM = std::max(s->longestUpM, isl.distanceM);
+                    }
+                }
+            }).Bind(PeekPointer(manager), &stats));
+        ntn.Start();
+        Simulator::Stop(Seconds(3600));
+        Simulator::Run();
+        Simulator::Destroy();
+    }
+    out << "longest_isl_up," << stats.longestUpM / M_PER_KM << ',' << losLimitM / M_PER_KM
+        << ",km\n"
+        << "isl_up_samples," << stats.upSamples << ",,count\n"
+        << "up_but_blocked_or_down_but_clear," << stats.inconsistent << ",0,count\n";
+    std::cout << "V5b longest ISL " << std::fixed << std::setprecision(1)
+              << stats.longestUpM / M_PER_KM << " km (line-of-sight limit " << losLimitM / M_PER_KM
+              << " km), " << stats.inconsistent << " inconsistent of " << stats.upSamples
+              << " up samples\n";
+    constexpr double NEAR_LIMIT_FRACTION = 0.99;
+    ok = Verdict("V5b only the Earth limits ISLs; longest ISL just below the line-of-sight limit",
+                 stats.inconsistent == 0 && stats.longestUpM <= losLimitM &&
+                     stats.longestUpM >= NEAR_LIMIT_FRACTION * losLimitM) &&
+         ok;
+    return ok;
+}
+
 } // namespace
 
 int
@@ -491,7 +606,7 @@ main(int argc, char* argv[])
     std::string validationCase = "all";
     std::string outputDir = ".";
     CommandLine cmd(__FILE__);
-    cmd.AddValue("case", "Validation case: V1, V2, V3, V4 or all", validationCase);
+    cmd.AddValue("case", "Validation case: V1, V2, V3, V4, V5 or all", validationCase);
     cmd.AddValue("outputDir", "Directory for the result CSV files (must exist)", outputDir);
     cmd.Parse(argc, argv);
 
@@ -512,6 +627,10 @@ main(int argc, char* argv[])
     if (validationCase == "V4" || validationCase == "all")
     {
         ok = RunV4(outputDir) && ok;
+    }
+    if (validationCase == "V5" || validationCase == "all")
+    {
+        ok = RunV5(outputDir) && ok;
     }
     std::cout << (ok ? "ALL VALIDATION CASES PASSED" : "SOME VALIDATION CASES FAILED") << "\n";
     return ok ? 0 : 1;

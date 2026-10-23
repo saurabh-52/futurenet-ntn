@@ -7,6 +7,7 @@
 
 #include "ntn-association-policy.h"
 #include "ntn-common-types.h"
+#include "ntn-isl-model.h"
 #include "ntn-propagation-delay-model.h"
 #include "ntn-visibility-model.h"
 
@@ -41,6 +42,10 @@ namespace ns3
  * every gateway-satellite pair and lets each satellite use the visible gateway that sees it
  * highest (GatewayVisibilityChange, GatewayLinkDelayUpdate, GatewayAssociationChange), so
  * GetEndToEndPath() gives ground -> satellite -> gateway (SRS M01-FR-11).
+ *
+ * With EnableIsl, each update also checks every satellite pair with the NtnIslModel (range and
+ * Earth clearance) and fires IslStateChange / IslDelayUpdate (SRS M01-FR-12). The manager only
+ * reports which ISLs exist and their delay; routing over them is left to other modules.
  *
  * The manager only computes and reports state. Turning network links up or down is done by
  * whoever listens to the traces (NtnIpLinkController in this module), so other modules can
@@ -108,6 +113,12 @@ class NtnLinkManager : public Object
     /** @param policy association policy to use (replaces the default HighestElevationPolicy) */
     void SetPolicy(Ptr<NtnAssociationPolicy> policy);
 
+    /** @param model ISL feasibility model to use (replaces the default one) */
+    void SetIslModel(Ptr<NtnIslModel> model);
+
+    /** @return the ISL feasibility model in use */
+    Ptr<NtnIslModel> GetIslModel() const;
+
     /** @return the association policy in use */
     Ptr<NtnAssociationPolicy> GetPolicy() const;
 
@@ -137,6 +148,12 @@ class NtnLinkManager : public Object
 
     /** @return true if gateways are enabled */
     bool GetEnableGateway() const;
+
+    /** @param enable evaluate inter-satellite links every update (SRS M01-FR-12) */
+    void SetEnableIsl(bool enable);
+
+    /** @return true if inter-satellite links are evaluated */
+    bool GetEnableIsl() const;
 
     /** Run Update() now and then every UpdateInterval until Stop() or the end of the run. */
     void Start();
@@ -223,6 +240,31 @@ class NtnLinkManager : public Object
     NtnEndToEndPath GetEndToEndPath(uint32_t groundNodeId) const;
 
     /**
+     * @param satelliteA a satellite node ID
+     * @param satelliteB another satellite node ID (order does not matter)
+     * @return the ISL state of the pair from the last update (aborts if ISLs were never
+     *         evaluated for this pair)
+     */
+    NtnIslState GetIslState(uint32_t satelliteA, uint32_t satelliteB) const;
+
+    /** @return every ISL candidate pair, ordered by (satelliteA, satelliteB) */
+    std::vector<NtnIslState> GetIslStates() const;
+
+    /**
+     * @param satelliteNodeId satellite node ID
+     * @return the satellites it currently has an ISL with, ordered by node ID
+     */
+    std::vector<uint32_t> GetIslNeighbours(uint32_t satelliteNodeId) const;
+
+    /**
+     * @param satelliteA a satellite node ID
+     * @param satelliteB another satellite node ID
+     * @return the common link-state view of the ISL (source = satelliteA, destination =
+     *         satelliteB, available = ISL up, propagation delay NaN while down)
+     */
+    NtnLinkState GetIslLinkState(uint32_t satelliteA, uint32_t satelliteB) const;
+
+    /**
      * @param groundNodeId ground terminal node ID
      * @return number of AssociationChange events of this terminal (including gaining or
      *         losing coverage)
@@ -275,6 +317,14 @@ class NtnLinkManager : public Object
     typedef void (*GatewayAssociationChangeTracedCallback)(uint32_t satelliteId,
                                                            int32_t oldGatewayId,
                                                            int32_t newGatewayId);
+
+    /**
+     * TracedCallback signature for IslStateChange.
+     * @param satelliteA lower satellite node ID
+     * @param satelliteB higher satellite node ID
+     * @param up true if the ISL became possible, false if it was lost
+     */
+    typedef void (*IslStateChangeTracedCallback)(uint32_t satelliteA, uint32_t satelliteB, bool up);
 
     /**
      * TracedCallback signature for SlantRangeUpdate.
@@ -341,6 +391,12 @@ class NtnLinkManager : public Object
     void UpdateGateways(const std::vector<Vector>& satellitePositionsM);
 
     /**
+     * Update distance, clearance, delay and state of every satellite pair.
+     * @param satellitePositionsM satellite positions, in m_satellites order
+     */
+    void UpdateIsls(const std::vector<Vector>& satellitePositionsM);
+
+    /**
      * Abort with a clear message if a policy decision breaks the rules of
      * NtnAssociationDecision (only visible satellites, no duplicates, at most
      * MaxAssociationsPerGround in total).
@@ -388,14 +444,18 @@ class NtnLinkManager : public Object
     std::map<std::pair<uint32_t, uint32_t>, NtnPairState> m_gatewayPairs;
     /// Gateway association of every satellite, by satellite node ID.
     std::map<uint32_t, SatelliteGatewayEntry> m_satelliteGateways;
+    /// ISL state of every satellite pair (lower ID, higher ID), filled when ISLs are enabled.
+    std::map<std::pair<uint32_t, uint32_t>, NtnIslState> m_islPairs;
 
     Ptr<NtnVisibilityModel> m_visibility;  //!< Visibility rule
     Ptr<NtnPropagationDelayModel> m_delay; //!< Delay calculation
     Ptr<NtnAssociationPolicy> m_policy;    //!< Association decision
+    Ptr<NtnIslModel> m_isl;                //!< ISL feasibility rule
     Time m_updateInterval;                 //!< Time between updates
     DataRate m_dataRate;                   //!< Logical link data rate
     uint32_t m_maxAssociations;            //!< MaxAssociationsPerGround
     bool m_enableGateway;                  //!< EnableGateway
+    bool m_enableIsl;                      //!< EnableIsl
     EventId m_updateEvent;                 //!< Next scheduled periodic update
 
     TracedCallback<uint32_t, uint32_t, bool> m_visibilityChangeTrace;    //!< VisibilityChange
@@ -409,6 +469,8 @@ class NtnLinkManager : public Object
     /// GatewayAssociationChange
     TracedCallback<uint32_t, int32_t, int32_t> m_gatewayAssociationChangeTrace;
     TracedCallback<uint32_t, uint32_t, Time> m_gatewayLinkDelayUpdateTrace; //!< Gateway delay
+    TracedCallback<uint32_t, uint32_t, bool> m_islStateChangeTrace;         //!< IslStateChange
+    TracedCallback<uint32_t, uint32_t, Time> m_islDelayUpdateTrace;         //!< IslDelayUpdate
 };
 
 } // namespace ns3

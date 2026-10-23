@@ -91,6 +91,14 @@ class NtnHelper
     void SetDelayAttribute(const std::string& name, const AttributeValue& value);
 
     /**
+     * Set an Attribute of the NtnIslModel (ISLs are switched on with
+     * SetLinkAttribute("EnableIsl", BooleanValue(true))).
+     * @param name attribute name (MaxIslRange, IslMinClearance)
+     * @param value attribute value
+     */
+    void SetIslAttribute(const std::string& name, const AttributeValue& value);
+
+    /**
      * Use another association policy instead of the default HighestElevationPolicy.
      * @param policy the policy object
      */
@@ -175,14 +183,17 @@ class NtnHelper
     Ipv4Address GetGatewayServiceAddress() const;
 
     /**
-     * Write the link-state CSV and/or the common event log. An empty path disables that file.
+     * Write the link-state CSV, the common event log and/or the ISL CSV. An empty path disables
+     * that file.
      * @param linkStateCsv link-state CSV path
      * @param eventLogCsv common event log path
-     * @param sampleInterval minimum time between link-state samples (0 = every update)
+     * @param sampleInterval minimum time between link-state / ISL samples (0 = every update)
+     * @param islCsv ISL CSV path (rows only when EnableIsl is true)
      */
     void EnableTracing(const std::string& linkStateCsv,
                        const std::string& eventLogCsv,
-                       Time sampleInterval = Time(0));
+                       Time sampleInterval = Time(0),
+                       const std::string& islCsv = "");
 
     /** Start the periodic link updates (first update at the current simulation time). */
     void Start();

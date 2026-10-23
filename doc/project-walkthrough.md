@@ -6,7 +6,7 @@ to understand (or present) the project, not only use it. It is extended after ev
 
 * Phase 1 (Mandatory) — sections 1–12 ✅
 * Phase 2 (Recommended) — sections P2.1–P2.8 ✅
-* Phase 3 (Optional) — to be added
+* Phase 3 (Optional) — sections P3.1–P3.6 ✅, then a one-page final summary
 
 ---
 
@@ -611,4 +611,136 @@ capacity limits, a pluggable gateway policy.
 
 ## Phase 3 — Optional requirements
 
-*(will be added after Phase 3: inter-satellite links and any approved extras)*
+### P3.1 What Phase 3 asks for, and what we chose
+
+| ID | In plain words | Decision |
+|---|---|---|
+| M01-FR-12 | **Inter-satellite links (ISLs)**: satellites talk directly to each other (laser/radio links), so traffic can travel through space to a satellite that sees a gateway. Two satellites may link if they are close enough and the Earth is not in the way. | ✅ built |
+| Extra (a) | Earth rotation for ground terminals | not built (team decision) |
+| Extra (b) | Simple link budget that can mark a link unusable | not built (team decision) |
+| Extra (c) | Per-satellite energy counter | not built (team decision) |
+
+As in Phase 2, the default (`EnableIsl = false`) keeps every earlier output unchanged.
+
+### P3.2 Step 17 — When can two satellites have an ISL? (`NtnIslModel`)
+
+Two rules (both configurable):
+
+1. **Range:** distance ≤ `MaxIslRange` (default 5,000 km) — a stand-in for transmitter power and
+   pointing limits.
+2. **Earth in the way:** the straight line between the two satellites must stay at least
+   `IslMinClearance` (default 0 m) above the surface. 0 means exactly "the line must not go
+   through the Earth"; e.g. 100 km would keep the beam out of the dense atmosphere.
+
+**How "is the Earth in the way?" is computed.** Take the segment from satellite A to B. Its point
+closest to the Earth centre is P = A + t·(B − A) with t = −A·(B − A) / |B − A|², **limited to
+0 … 1** so that P stays on the segment. The *clearance* is |P| − R, the lowest altitude the line
+reaches; negative means it passes through the Earth.
+
+Why the "limited to 0 … 1" matters: if both satellites are on the same radius (one 600 km up, one
+1,600 km up), the closest point of the *infinite* line is the Earth centre (clearance −6,371 km,
+"blocked"), but the *segment* never gets lower than the 600 km satellite (clearance 600 km). The
+test checks exactly this case, and removing the limit makes the test fail.
+
+**Worked example — two satellites on one 600 km ring** (a = 6,971 km), θ apart. The lowest point
+is the middle of the chord, so distance = 2a·sin(θ/2) and clearance = a·cos(θ/2) − R:
+
+| θ | Distance | Clearance | ISL (5,000 km, 0 m)? |
+|---|---|---|---|
+| 30° | 3,608.5 km | +362.5 km | ✔ up |
+| 40° | 4,768.4 km | +179.6 km | ✔ up (✘ with a 200 km margin) |
+| 60° | 6,971.0 km | −333.9 km | ✘ too far *and* through the Earth |
+
+**Line-of-sight limit.** The longest possible ISL between two 600 km satellites just grazes the
+surface: 2·√(a² − R²) = 2·√(6,971² − 6,371²) = **5,658.7 km**. That is why the default range of
+5,000 km is a meaningful limit, and why V5 checks that no ISL is ever longer than this.
+
+### P3.3 Step 18 — ISLs in the link manager
+
+With `EnableIsl = true`, each update (after the gateways, before the ground terminals) checks
+every satellite pair once — S·(S − 1)/2 pairs, 7,140 for 120 satellites — computes distance,
+clearance and delay (same delay model: distance / c + 1 ms processing), and fires
+`IslStateChange(A, B, up/down)` on a change and `IslDelayUpdate` for every ISL that is up. Pairs
+are always stored with the lower node ID first. Queries: `GetIslState`, `GetIslNeighbours`,
+`GetIslLinkState` (in the common `LinkState` format, so a routing module can treat ISLs like any
+other link). Output: `IslStateChange` rows in the common event log and an optional ISL CSV with
+one row per ISL that is up.
+
+**Worked example — a link that drifts apart** (test): two equatorial satellites at 600 km and
+1,200 km start together. The lower one is faster (it needs 5,792 s per orbit, the higher one
+6,556 s), so the angle between them grows by 0.00724 °/s:
+
+| Time | Angle | Distance | Clearance | ISL with 5,000 km range | ISL with 20,000 km range |
+|---|---|---|---|---|---|
+| 0 s | 0° | 600 km | +600 km | up | up |
+| 5,519 s | 39.96° | 5,000.4 km | +407 km | **down (too far)** | up |
+| 7,825 s | 56.65° | — | < 0 | down | **down (Earth)** |
+
+The test expects exactly these two drop times (±1 update of 1 s) — computed beforehand with a
+separate Python script.
+
+**Why no routing over ISLs here?** Choosing a multi-hop path is *routing*, which is another
+FutureNet module's topic (M02). M01 provides everything such a module needs (which links exist,
+their delay, events when they change) without depending on it.
+
+### P3.4 Step 19 — Validation V5 and the ISL example
+
+**V5a** — 12 satellites on one ring are 30° apart: simulated neighbour distance 3,608.455 km =
+2a·sin 15°; link delay 13.0365 ms = 3,608.455 km / c + 1 ms (error 0.31 ns).
+
+**V5b** — 120 satellites in 10 planes, range set to the maximum (so only the Earth limits ISLs),
+one hour: in every one of the 404,850 "up" samples and every "down" sample the state equals "the
+line clears the Earth", and the longest ISL seen, 5,658.68 km, is just 12 m below the
+line-of-sight limit 5,658.69 km.
+
+**ISL example** (`ntn-example-isl`, same 120-satellite constellation, 3 gateways, 20 terminals):
+
+| | Without ISLs (direct) | With ISLs |
+|---|---|---|
+| Terminal samples that reach a gateway | 92.2 % | **100 %** |
+| Mean end-to-end delay | 9.45 ms | 10.26 ms |
+
+Each satellite has about 15 ISL neighbours at 5,000 km range. The delay "with ISLs" is a bit
+higher on average because it now also includes the terminals that need extra hops (each ISL hop
+adds about 1 ms processing + distance / c). With a 1,500 km range there are only ~1.4 neighbours
+per satellite and ISLs add nothing — neighbours in the same ring are 3,608 km apart.
+
+*Lesson learned (performance):* checking 7,140 pairs every 100 ms made this example take 26 s.
+Since it sends no packets, it uses 1 s updates (≈ 5 s, identical table). The documentation states
+the O(S²/2) cost.
+
+### P3.5 Step 20 — Tests
+
+One new test case (17 in total, all earlier ones unchanged): defaults, rejected values, the
+clearance table above, the segment end-point case, manager state/neighbours/delays, both drop
+times, event-log and ISL CSV rows. Mutation checks: removing the 0 … 1 limit and ignoring the
+Earth both make it fail.
+
+### P3.6 Phase 3 result in one table
+
+| Item | Result |
+|---|---|
+| M01-FR-12 ISLs | ✔ range + Earth-clearance rule, state, delay, traces, event rows, ISL CSV |
+| Tests | ✔ 17 / 17 (11 Phase 1 + 5 Phase 2 + 1 Phase 3) |
+| Validation | ✔ V1–V5, 13 PASS lines |
+| Style / warnings | ✔ clang-format clean, 0 warnings |
+| Optional extras (a)–(c) | not built (decision) |
+
+---
+
+## Final summary — the whole project in one page
+
+| Phase | What the module can do after it |
+|---|---|
+| 1 Mandatory | Satellites on circular orbits, terminals by lat/lon, visibility by elevation, slant range, delay = distance / c + processing, one association per terminal by a policy, handovers, traces, two CSV outputs, real IP packets with the changing delay. |
+| 2 Recommended | Multi-plane Walker constellations, up to 4 associations per terminal, a sticky policy (−11 % handovers for +0.55 ms delay), gateways with a real terminal → satellite → gateway IP path, an API description for other modules. |
+| 3 Optional | Inter-satellite links with a range and Earth-blocking rule, ready for a routing module. |
+
+Numbers to remember: orbit period at 600 km 96.5 min · overhead delay 2.0014 ms (+1 ms
+processing) · a pass lasts ~8.5 min at 10° minimum elevation · 20 × 12 demo: 48 handovers ·
+120-satellite constellation: 92 % direct gateway reachability, 100 % with ISLs · longest possible
+ISL at 600 km: 5,658.7 km.
+
+What is still *not* modelled: Earth rotation, link budget / fading / weather, antennas and beams,
+Doppler, NR PHY/MAC, routing over ISLs, capacity limits, energy. All of these are listed in the
+"Scope and Limitations" section of `doc/futurenet-ntn.rst`.

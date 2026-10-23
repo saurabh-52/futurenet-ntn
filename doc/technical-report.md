@@ -1,6 +1,7 @@
 # futurenet-ntn (M01) — Technical Report: Design Decisions and Limitations
 
-Deliverable D8. Phase 1 (Mandatory) and Phase 2 (Recommended) requirements. ns-3.46.1.
+Deliverable D8. Phase 1 (Mandatory), Phase 2 (Recommended) and Phase 3 (Optional: ISLs)
+requirements. ns-3.46.1.
 
 ## 1. Goal
 
@@ -45,6 +46,17 @@ standards conformance.
 | 24 | Gateways get a shared "gateway service address"; return routes added on each gateway change | Same idea as the satellite service address. ns-3 deletes routes through a downed interface, so only additions are needed. |
 | 25 | Gateway rows appended to the link-state CSV only when gateways exist | Keeps the SRS §9 header and keeps Phase 1 output byte-identical. |
 
+### 2.2 Phase 3 decisions
+
+| # | Decision | Reason |
+|---|---|---|
+| 26 | Only ISLs (M01-FR-12) built; Earth rotation, link budget and energy counter not built | User decision when asked before Phase 3. |
+| 27 | ISL rule in its own class `NtnIslModel` (`MaxIslRange`, `IslMinClearance`) | One responsibility; the manager stays a mechanism. Clearance 0 = exactly "must not pass through the Earth"; a margin can model the atmosphere. |
+| 28 | Clearance from the closest point of the *segment* (parameter clamped to [0,1]) | The closest point of the infinite line can lie outside the segment; without the clamp two satellites on one radius would look Earth-blocked. |
+| 29 | Module reports ISL state/delay; no IP routing over ISLs | Multi-hop route choice is routing (M02's subject); M01 must not depend on or duplicate M02. An example shows the potential (shortest delay to a gateway) as analysis only. |
+| 30 | ISL CSV lists only ISLs that are up | All pairs would be S²/2 rows per sample (7,140 for 120 satellites). |
+| 31 | `EnableIsl` default false | Earlier outputs unchanged; ISL checks are O(S²/2) per update. |
+
 ## 3. Verification summary
 
 * 11 automated test cases (T1–T6 categories), all passing; a mutation check (adding 5 ns to the
@@ -61,6 +73,10 @@ standards conformance.
   the suite fail. V1–V3 result files are byte-identical to Phase 1.
 * V4: sticky policy 299 vs 336 handovers (−11 %) at the cost of mean delay 5.48 vs 4.93 ms, same
   coverage.
+* Phase 3: 1 more test case (17 in total). V5: ring neighbour distance/delay match closed form
+  (0.31 ns); in 1 h of a 120-satellite constellation the ISL state always equals "line clears the
+  Earth"; longest ISL 5,658.68 km vs line-of-sight limit 5,658.69 km. Mutations "no segment
+  clamp" and "ignore Earth" make the suite fail.
 
 ## 4. Limitations
 
@@ -76,6 +92,9 @@ See `doc/futurenet-ntn.rst`, "Scope and Limitations". Most important for users:
    traffic towards the ground network; gateways are not interconnected.
 7. The gateway choice is a fixed rule; no satellite or gateway capacity limits.
 8. Secondary associations keep links up but carry no default traffic (no multipath scheduling).
+9. ISLs: geometric rule only (no terminal-count, pointing, capacity or link-budget limits); state
+   and delay are reported but no packets are routed over ISLs.
+10. Not built: Earth rotation, link budget, energy model (optional extras, not selected).
 
 ## 5. Deviations from the SRS / prompt
 
@@ -89,4 +108,6 @@ See `doc/futurenet-ntn.rst`, "Scope and Limitations". Most important for users:
 | Class names `CircularOrbitMobilityModel`, `HighestElevationPolicy` | kept without the `Ntn` prefix | Names are prescribed by the SRS; all other new types are `Ntn`-prefixed (QG-08). |
 | clang-format version | 20 installed from PyPI | ns-3.46.1's style script accepts only clang-format 20; Ubuntu 24.04 ships 18. |
 | `PlanePhaseOffset`, `RaanSpread` | extra Attributes not in the SRS table | SRS FR-10 asks for "configurable initial phase offsets"; RaanSpread allows Walker star layouts. Defaults keep the SRS behaviour. |
+| `MaxIslRange`, `IslMinClearance` | project values (5,000 km, 0 m), not from the SRS | SRS FR-12 only says "simplified range/visibility model"; the prompt asks for a configurable max range and "line not through the Earth". |
+| ISL example update interval | 1 s instead of 100 ms | No traffic in that example; O(S²/2) ISL checks every 100 ms took 26 s for 20 min, 1 s gives the same table in ~5 s. |
 | Policy comparison scenario | 120 satellites / 10 planes | With the 24-satellite layout tried first both policies give identical handover counts (terminals rarely see two satellites), so the comparison would show nothing. |
