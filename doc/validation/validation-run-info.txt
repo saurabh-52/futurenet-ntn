@@ -1,6 +1,6 @@
 ns3_version=3.46.1
 module=futurenet-ntn
-git_commit=211295f
+git_commit=61ea3f7
 rng_seed=1
 rng_run=1
 command_line=/opt/ns-allinone-3.46.1/ns-3.46.1/build/contrib/futurenet-ntn/examples/ns3.46.1-ntn-validation-default --outputDir=contrib/futurenet-ntn/doc/validation
