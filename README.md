@@ -119,6 +119,9 @@ Git commit, seed, run, command line). Use `--PrintHelp` to list every option.
 
 ## Documentation
 
+* `setup_guide.md` — setting the project up on a new laptop (Docker or native Ubuntu)
+* `doc/project-walkthrough.md` — problem statement and step-by-step how it was built, with
+  worked examples
 * `doc/futurenet-ntn.rst` — model description, formulas, parameters, traces, validation,
   extension points, limitations
 * `doc/technical-report.md` — design decisions and limitations (D8)
