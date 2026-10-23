@@ -29,12 +29,14 @@
 #include "ns3/ntn-propagation-delay-model.h"
 #include "ns3/ntn-trace-writer.h"
 #include "ns3/ntn-visibility-model.h"
+#include "ns3/ntn-walker-constellation.h"
 #include "ns3/packet.h"
 #include "ns3/rng-seed-manager.h"
 #include "ns3/simulator.h"
 #include "ns3/socket.h"
 #include "ns3/test.h"
 #include "ns3/udp-socket-factory.h"
+#include "ns3/uinteger.h"
 
 #include <algorithm>
 #include <fstream>
@@ -973,6 +975,113 @@ class NtnValidationScenarioTestCase : public TestCase
 
 /**
  * @ingroup futurenet-ntn-tests
+ * T1 / T2 / T3 for M01-FR-10: Walker layout defaults, rejected values, and satellite angles and
+ * positions in a multi-plane constellation (expected values worked out by hand from the
+ * NtnWalkerConstellation formulas).
+ */
+class NtnWalkerConstellationTestCase : public TestCase
+{
+  public:
+    NtnWalkerConstellationTestCase()
+        : TestCase("T1 T2 T3 M01-FR-10 multi-plane Walker constellation layout")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        // T1: defaults keep the single-plane layout of Phase 1.
+        Ptr<NtnWalkerConstellation> walker = CreateObject<NtnWalkerConstellation>();
+        UintegerValue planes;
+        DoubleValue d;
+        walker->GetAttribute("NumOrbitalPlanes", planes);
+        NS_TEST_ASSERT_MSG_EQ(planes.Get(), 1, "NumOrbitalPlanes default must be 1 (SRS)");
+        walker->GetAttribute("PlanePhaseOffset", d);
+        NS_TEST_ASSERT_MSG_EQ(d.Get(), 0.0, "PlanePhaseOffset default must be 0 deg");
+        walker->GetAttribute("RaanSpread", d);
+        NS_TEST_ASSERT_MSG_EQ(d.Get(), 360.0, "RaanSpread default must be 360 deg");
+
+        // T2: out-of-range values are rejected.
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("NumOrbitalPlanes", UintegerValue(0)),
+                              false,
+                              "0 planes rejected");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("NumOrbitalPlanes", UintegerValue(21)),
+                              false,
+                              "21 planes rejected");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("NumOrbitalPlanes", UintegerValue(20)),
+                              true,
+                              "20 planes accepted");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("PlanePhaseOffset", DoubleValue(360.0)),
+                              false,
+                              "PlanePhaseOffset 360 rejected");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("RaanSpread", DoubleValue(0.0)),
+                              false,
+                              "RaanSpread 0 rejected");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("RaanSpread", DoubleValue(360.1)),
+                              false,
+                              "RaanSpread 360.1 rejected");
+
+        // T3: 6 satellites, 3 planes, offset 20 deg, Raan0 = 10, phase0 = 5. Two satellites per
+        // plane, 180 deg apart; planes 120 deg apart; each plane shifted 20 deg forward.
+        walker->SetNumOrbitalPlanes(3);
+        walker->SetPlanePhaseOffset(20.0);
+        walker->SetRaanSpread(360.0);
+        const double expected[6][4] = {{0, 0, 10, 5},
+                                       {0, 1, 10, 185},
+                                       {1, 0, 130, 25},
+                                       {1, 1, 130, 205},
+                                       {2, 0, 250, 45},
+                                       {2, 1, 250, 225}};
+        for (uint32_t k = 0; k < 6; ++k)
+        {
+            const NtnOrbitSlot slot = walker->GetSlot(k, 6, 10.0, 5.0);
+            NS_TEST_ASSERT_MSG_EQ(slot.planeIndex, expected[k][0], "plane of satellite " << k);
+            NS_TEST_ASSERT_MSG_EQ(slot.slotInPlane, expected[k][1], "slot of satellite " << k);
+            NS_TEST_ASSERT_MSG_EQ_TOL(slot.raanDeg, expected[k][2], 1e-9, "RAAN of " << k);
+            NS_TEST_ASSERT_MSG_EQ_TOL(slot.initialPhaseDeg, expected[k][3], 1e-9, "phase " << k);
+        }
+        // Angles wrap into [0, 360): 300 + 2 * 120 = 540 -> 180.
+        NS_TEST_ASSERT_MSG_EQ_TOL(walker->GetSlot(4, 6, 300.0, 0.0).raanDeg,
+                                  180.0,
+                                  1e-9,
+                                  "RAAN wraps around");
+        // Walker star: planes spread over 180 deg -> RAAN 0, 60, 120.
+        walker->SetRaanSpread(180.0);
+        NS_TEST_ASSERT_MSG_EQ_TOL(walker->GetSlot(5, 6, 0.0, 0.0).raanDeg,
+                                  120.0,
+                                  1e-9,
+                                  "star layout");
+
+        // Through the helper: 6 satellites in 3 planes. At t = 0 a satellite with phase u = 0
+        // sits on its ascending node, i.e. on the equator at longitude = RAAN, whatever the
+        // inclination: position (a cos RAAN, a sin RAAN, 0).
+        NodeContainer sats;
+        sats.Create(6);
+        NtnHelper ntn;
+        ntn.SetConstellationAttribute("NumOrbitalPlanes", UintegerValue(3));
+        ntn.InstallSatellites(sats);
+        for (uint32_t k = 0; k < 6; k += 2)
+        {
+            const NtnOrbitSlot slot = ntn.GetOrbitSlot(sats.Get(k)->GetId());
+            const double raanRad = ntn::DegToRad(k / 2 * 120.0);
+            const Vector position = sats.Get(k)->GetObject<MobilityModel>()->GetPosition();
+            NS_TEST_ASSERT_MSG_EQ(slot.planeIndex, k / 2, "helper plane index");
+            NS_TEST_ASSERT_MSG_EQ_TOL(position.x,
+                                      ORBIT_RADIUS_600_KM_M * std::cos(raanRad),
+                                      POSITION_TOLERANCE_M,
+                                      "x of first satellite in plane " << k / 2);
+            NS_TEST_ASSERT_MSG_EQ_TOL(position.y,
+                                      ORBIT_RADIUS_600_KM_M * std::sin(raanRad),
+                                      POSITION_TOLERANCE_M,
+                                      "y of first satellite in plane " << k / 2);
+            NS_TEST_ASSERT_MSG_EQ_TOL(position.z, 0.0, POSITION_TOLERANCE_M, "on the equator");
+        }
+        Simulator::Destroy();
+    }
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
  * The futurenet-ntn test suite.
  */
 class FuturenetNtnTestSuite : public TestSuite
@@ -992,6 +1101,7 @@ class FuturenetNtnTestSuite : public TestSuite
         AddTestCase(new NtnReproducibilityTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnIntegrationTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnValidationScenarioTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnWalkerConstellationTestCase, TestCase::Duration::QUICK);
     }
 };
 

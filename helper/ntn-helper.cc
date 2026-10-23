@@ -37,7 +37,8 @@ const char* const DEFAULT_SERVICE_ADDRESS = "10.255.255.1";
 } // namespace
 
 NtnHelper::NtnHelper()
-    : m_linkManager(CreateObject<NtnLinkManager>()),
+    : m_constellation(CreateObject<NtnWalkerConstellation>()),
+      m_linkManager(CreateObject<NtnLinkManager>()),
       m_serviceAddress(DEFAULT_SERVICE_ADDRESS)
 {
     m_orbitFactory.SetTypeId("ns3::CircularOrbitMobilityModel");
@@ -48,6 +49,12 @@ void
 NtnHelper::SetOrbitAttribute(const std::string& name, const AttributeValue& value)
 {
     m_orbitFactory.Set(name, value);
+}
+
+void
+NtnHelper::SetConstellationAttribute(const std::string& name, const AttributeValue& value)
+{
+    m_constellation->SetAttribute(name, value);
 }
 
 void
@@ -97,19 +104,31 @@ NtnHelper::InstallSatellites(NodeContainer satellites)
         numSatellites < ntn::MIN_NUM_SATELLITES || numSatellites > ntn::MAX_NUM_SATELLITES,
         "NumSatellites " << numSatellites << " is outside the project range "
                          << ntn::MIN_NUM_SATELLITES << " - " << ntn::MAX_NUM_SATELLITES);
-    const double spacingDeg = ntn::FULL_CIRCLE_DEG / numSatellites;
     for (uint32_t k = 0; k < numSatellites; ++k)
     {
         Ptr<Node> node = satellites.Get(k);
         NS_ABORT_MSG_IF(node->GetObject<MobilityModel>(),
                         "Satellite node " << node->GetId() << " already has a MobilityModel");
         Ptr<CircularOrbitMobilityModel> orbit = m_orbitFactory.Create<CircularOrbitMobilityModel>();
-        // Spread the satellites evenly around the ring, starting at the configured phase.
-        orbit->SetInitialPhase(
-            std::fmod(orbit->GetInitialPhase() + k * spacingDeg, ntn::FULL_CIRCLE_DEG));
+        // The configured Raan and InitialPhase belong to the first satellite of the first plane;
+        // the constellation derives every other satellite's angles from them.
+        const NtnOrbitSlot slot =
+            m_constellation->GetSlot(k, numSatellites, orbit->GetRaan(), orbit->GetInitialPhase());
+        orbit->SetRaan(slot.raanDeg);
+        orbit->SetInitialPhase(slot.initialPhaseDeg);
         node->AggregateObject(orbit);
         m_linkManager->AddSatelliteNode(node);
+        m_orbitSlots[node->GetId()] = slot;
     }
+}
+
+NtnOrbitSlot
+NtnHelper::GetOrbitSlot(uint32_t satelliteNodeId) const
+{
+    auto it = m_orbitSlots.find(satelliteNodeId);
+    NS_ABORT_MSG_IF(it == m_orbitSlots.end(),
+                    "Node " << satelliteNodeId << " was not installed by InstallSatellites()");
+    return it->second;
 }
 
 void

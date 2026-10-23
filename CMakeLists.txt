@@ -11,6 +11,7 @@ build_lib(
     model/ntn-propagation-delay-model.cc
     model/ntn-trace-writer.cc
     model/ntn-visibility-model.cc
+    model/ntn-walker-constellation.cc
   HEADER_FILES
     helper/ntn-helper.h
     model/circular-orbit-mobility-model.h
@@ -24,6 +25,7 @@ build_lib(
     model/ntn-propagation-delay-model.h
     model/ntn-trace-writer.h
     model/ntn-visibility-model.h
+    model/ntn-walker-constellation.h
   LIBRARIES_TO_LINK
     ${libcore}
     ${libmobility}

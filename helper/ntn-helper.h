@@ -13,8 +13,10 @@
 #include "ns3/ntn-ip-link-controller.h"
 #include "ns3/ntn-link-manager.h"
 #include "ns3/ntn-trace-writer.h"
+#include "ns3/ntn-walker-constellation.h"
 #include "ns3/object-factory.h"
 
+#include <map>
 #include <string>
 #include <utility>
 
@@ -52,6 +54,13 @@ class NtnHelper
      * @param value attribute value
      */
     void SetOrbitAttribute(const std::string& name, const AttributeValue& value);
+
+    /**
+     * Set an Attribute of the NtnWalkerConstellation used by InstallSatellites().
+     * @param name attribute name (NumOrbitalPlanes, PlanePhaseOffset, RaanSpread)
+     * @param value attribute value
+     */
+    void SetConstellationAttribute(const std::string& name, const AttributeValue& value);
 
     /**
      * Set an Attribute of the NtnGroundTerminalMobilityModel of terminals installed afterwards.
@@ -95,11 +104,20 @@ class NtnHelper
 
     /**
      * Give each satellite a CircularOrbitMobilityModel and register it with the link manager.
-     * The N satellites share one orbit plane and are spread evenly around it: satellite k gets
-     * InitialPhase = (InitialPhase + k * 360 / N) mod 360.
-     * @param satellites 1 - 200 satellite nodes (SRS NumSatellites)
+     * The N satellites are laid out by the NtnWalkerConstellation: divided equally between
+     * NumOrbitalPlanes planes, spread evenly around each plane, with the plane RAANs fanned out
+     * and PlanePhaseOffset between planes (see NtnWalkerConstellation). With one plane (the
+     * default) satellite k gets InitialPhase = (InitialPhase + k * 360 / N) mod 360.
+     * @param satellites 1 - 200 satellite nodes (SRS NumSatellites); a multiple of
+     *        NumOrbitalPlanes
      */
     void InstallSatellites(NodeContainer satellites);
+
+    /**
+     * @param satelliteNodeId node ID of a satellite installed by InstallSatellites()
+     * @return its plane, slot and orbit angles
+     */
+    NtnOrbitSlot GetOrbitSlot(uint32_t satelliteNodeId) const;
 
     /**
      * Place a fixed ground terminal and register it with the link manager.
@@ -176,12 +194,14 @@ class NtnHelper
     static void WriteRunInfo(const std::string& path, int argc, char* argv[]);
 
   private:
-    ObjectFactory m_orbitFactory;            //!< Creates satellite mobility models
-    ObjectFactory m_groundFactory;           //!< Creates ground terminal mobility models
-    Ptr<NtnLinkManager> m_linkManager;       //!< The mechanism
-    Ptr<NtnIpLinkController> m_ipController; //!< Network actuation (after InstallIpLinks)
-    Ptr<NtnTraceWriter> m_traceWriter;       //!< File output (after EnableTracing)
-    Ipv4Address m_serviceAddress;            //!< Address shared by all satellites
+    ObjectFactory m_orbitFactory;                  //!< Creates satellite mobility models
+    ObjectFactory m_groundFactory;                 //!< Creates ground terminal mobility models
+    Ptr<NtnWalkerConstellation> m_constellation;   //!< Satellite layout over orbital planes
+    std::map<uint32_t, NtnOrbitSlot> m_orbitSlots; //!< Slot of every installed satellite
+    Ptr<NtnLinkManager> m_linkManager;             //!< The mechanism
+    Ptr<NtnIpLinkController> m_ipController;       //!< Network actuation (after InstallIpLinks)
+    Ptr<NtnTraceWriter> m_traceWriter;             //!< File output (after EnableTracing)
+    Ipv4Address m_serviceAddress;                  //!< Address shared by all satellites
 };
 
 } // namespace ns3
