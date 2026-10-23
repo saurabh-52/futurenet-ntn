@@ -11,6 +11,7 @@
 #include "ns3/log.h"
 #include "ns3/simulator.h"
 #include "ns3/trace-source-accessor.h"
+#include "ns3/uinteger.h"
 
 #include <algorithm>
 #include <limits>
@@ -46,6 +47,15 @@ NtnLinkManager::GetTypeId()
                 MakeDataRateAccessor(&NtnLinkManager::SetDataRate, &NtnLinkManager::GetDataRate),
                 MakeNtnDataRateChecker(DataRate(ntn::MIN_DATA_RATE_BPS),
                                        DataRate(ntn::MAX_DATA_RATE_BPS)))
+            .AddAttribute("MaxAssociationsPerGround",
+                          "Most satellites a ground terminal may be associated with at the same "
+                          "time: one primary (carries the traffic) plus secondary ones whose "
+                          "links are kept up (project range 1 - 4).",
+                          UintegerValue(ntn::DEFAULT_ASSOCIATIONS_PER_GROUND),
+                          MakeUintegerAccessor(&NtnLinkManager::SetMaxAssociationsPerGround,
+                                               &NtnLinkManager::GetMaxAssociationsPerGround),
+                          MakeUintegerChecker<uint32_t>(ntn::MIN_ASSOCIATIONS_PER_GROUND,
+                                                        ntn::MAX_ASSOCIATIONS_PER_GROUND))
             .AddTraceSource("VisibilityChange",
                             "A satellite became visible or invisible from a ground terminal.",
                             MakeTraceSourceAccessor(&NtnLinkManager::m_visibilityChangeTrace),
@@ -54,6 +64,12 @@ NtnLinkManager::GetTypeId()
                             "A ground terminal changed its associated satellite (-1 = none).",
                             MakeTraceSourceAccessor(&NtnLinkManager::m_associationChangeTrace),
                             "ns3::NtnLinkManager::AssociationChangeTracedCallback")
+            .AddTraceSource(
+                "SecondaryAssociationChange",
+                "A satellite was added to (true) or removed from (false) the secondary "
+                "associations of a ground terminal (MaxAssociationsPerGround > 1 only).",
+                MakeTraceSourceAccessor(&NtnLinkManager::m_secondaryAssociationChangeTrace),
+                "ns3::NtnLinkManager::SecondaryAssociationChangeTracedCallback")
             .AddTraceSource("SlantRangeUpdate",
                             "Slant range [m] of a visible satellite, reported every update.",
                             MakeTraceSourceAccessor(&NtnLinkManager::m_slantRangeUpdateTrace),
@@ -74,7 +90,8 @@ NtnLinkManager::NtnLinkManager()
       m_delay(CreateObject<NtnPropagationDelayModel>()),
       m_policy(CreateObject<HighestElevationPolicy>()),
       m_updateInterval(MilliSeconds(ntn::DEFAULT_UPDATE_INTERVAL_MS)),
-      m_dataRate(ntn::DEFAULT_DATA_RATE_BPS)
+      m_dataRate(ntn::DEFAULT_DATA_RATE_BPS),
+      m_maxAssociations(ntn::DEFAULT_ASSOCIATIONS_PER_GROUND)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -251,6 +268,25 @@ NtnLinkManager::GetDataRate() const
 }
 
 void
+NtnLinkManager::SetMaxAssociationsPerGround(uint32_t maxAssociations)
+{
+    NS_LOG_FUNCTION(this << maxAssociations);
+    NS_ABORT_MSG_IF(maxAssociations < ntn::MIN_ASSOCIATIONS_PER_GROUND ||
+                        maxAssociations > ntn::MAX_ASSOCIATIONS_PER_GROUND,
+                    "MaxAssociationsPerGround " << maxAssociations
+                                                << " is outside the project range "
+                                                << ntn::MIN_ASSOCIATIONS_PER_GROUND << " - "
+                                                << ntn::MAX_ASSOCIATIONS_PER_GROUND);
+    m_maxAssociations = maxAssociations;
+}
+
+uint32_t
+NtnLinkManager::GetMaxAssociationsPerGround() const
+{
+    return m_maxAssociations;
+}
+
+void
 NtnLinkManager::Start()
 {
     NS_LOG_FUNCTION(this);
@@ -295,6 +331,8 @@ NtnLinkManager::Update()
         state.now = now;
         state.groundId = groundId;
         state.currentSatelliteId = ground.associatedSatellite;
+        state.maxAssociations = m_maxAssociations;
+        state.currentSecondarySatelliteIds = ground.secondarySatellites;
 
         for (std::size_t i = 0; i < m_satellites.size(); ++i)
         {
@@ -332,45 +370,116 @@ NtnLinkManager::Update()
 }
 
 void
+NtnLinkManager::CheckDecision(const NtnAssociationState& state,
+                              const NtnAssociationDecision& decision) const
+{
+    const std::string policyName = m_policy->GetInstanceTypeId().GetName();
+    auto isVisible = [&state](int64_t satelliteId) {
+        return std::any_of(state.visibleCandidates.begin(),
+                           state.visibleCandidates.end(),
+                           [satelliteId](const NtnCandidate& c) {
+                               return static_cast<int64_t>(c.satelliteId) == satelliteId;
+                           });
+    };
+    // A policy may only pick visible satellites (or none); this guarantees SRS V3.
+    NS_ABORT_MSG_IF(decision.satelliteId != ntn::NO_SATELLITE && !isVisible(decision.satelliteId),
+                    "Policy " << policyName << " chose satellite " << decision.satelliteId
+                              << " which is not visible from ground " << state.groundId);
+    if (decision.secondarySatelliteIds.empty())
+    {
+        return;
+    }
+    NS_ABORT_MSG_IF(decision.satelliteId == ntn::NO_SATELLITE,
+                    "Policy " << policyName << " chose secondary satellites but no primary one "
+                              << "for ground " << state.groundId);
+    NS_ABORT_MSG_IF(decision.secondarySatelliteIds.size() >= m_maxAssociations,
+                    "Policy " << policyName << " chose 1 + "
+                              << decision.secondarySatelliteIds.size() << " satellites for ground "
+                              << state.groundId << " but MaxAssociationsPerGround is "
+                              << m_maxAssociations);
+    std::vector<uint32_t> secondary = decision.secondarySatelliteIds;
+    std::sort(secondary.begin(), secondary.end());
+    NS_ABORT_MSG_IF(std::adjacent_find(secondary.begin(), secondary.end()) != secondary.end(),
+                    "Policy " << policyName << " chose a secondary satellite twice for ground "
+                              << state.groundId);
+    for (uint32_t satelliteId : secondary)
+    {
+        NS_ABORT_MSG_IF(!isVisible(satelliteId),
+                        "Policy " << policyName << " chose secondary satellite " << satelliteId
+                                  << " which is not visible from ground " << state.groundId);
+        NS_ABORT_MSG_IF(static_cast<int32_t>(satelliteId) == decision.satelliteId,
+                        "Policy " << policyName << " chose satellite " << satelliteId
+                                  << " as both primary and secondary for ground "
+                                  << state.groundId);
+    }
+}
+
+void
 NtnLinkManager::ApplyDecision(GroundEntry& ground,
                               const NtnAssociationState& state,
                               const NtnAssociationDecision& decision)
 {
-    const int32_t newSatellite = decision.satelliteId;
-    // A policy may only pick a visible satellite (or none); this guarantees SRS V3.
-    NS_ABORT_MSG_IF(newSatellite != ntn::NO_SATELLITE &&
-                        std::none_of(state.visibleCandidates.begin(),
-                                     state.visibleCandidates.end(),
-                                     [newSatellite](const NtnCandidate& c) {
-                                         return static_cast<int32_t>(c.satelliteId) == newSatellite;
-                                     }),
-                    "Policy " << m_policy->GetInstanceTypeId().GetName() << " chose satellite "
-                              << newSatellite << " which is not visible from ground "
-                              << state.groundId);
+    CheckDecision(state, decision);
 
     const int32_t oldSatellite = ground.associatedSatellite;
-    if (newSatellite == oldSatellite)
+    const int32_t newSatellite = decision.satelliteId;
+    const std::vector<uint32_t> oldSecondary = ground.secondarySatellites;
+    std::vector<uint32_t> newSecondary = decision.secondarySatelliteIds;
+    std::sort(newSecondary.begin(), newSecondary.end());
+    if (newSatellite == oldSatellite && newSecondary == oldSecondary)
     {
         return;
     }
     const uint32_t groundId = state.groundId;
-    if (oldSatellite != ntn::NO_SATELLITE)
+
+    // Store the complete new association set before firing any trace, so listeners (e.g. the IP
+    // link controller) already see the final state of this update. A satellite can move between
+    // primary and secondary in one update; it must then stay associated throughout.
+    auto setAssociated = [this, groundId](int64_t satelliteId, bool associated) {
+        if (satelliteId != ntn::NO_SATELLITE)
+        {
+            m_pairs.at({groundId, static_cast<uint32_t>(satelliteId)}).associated = associated;
+        }
+    };
+    setAssociated(oldSatellite, false);
+    for (uint32_t satelliteId : oldSecondary)
     {
-        m_pairs.at({groundId, static_cast<uint32_t>(oldSatellite)}).associated = false;
+        setAssociated(satelliteId, false);
     }
-    if (newSatellite != ntn::NO_SATELLITE)
+    setAssociated(newSatellite, true);
+    for (uint32_t satelliteId : newSecondary)
     {
-        m_pairs.at({groundId, static_cast<uint32_t>(newSatellite)}).associated = true;
+        setAssociated(satelliteId, true);
     }
     ground.associatedSatellite = newSatellite;
-    ++ground.associationChanges;
-    if (oldSatellite != ntn::NO_SATELLITE && newSatellite != ntn::NO_SATELLITE)
+    ground.secondarySatellites = newSecondary;
+
+    // Traces: removed secondary satellites, then the primary change, then added ones.
+    for (uint32_t satelliteId : oldSecondary)
     {
-        ++ground.handovers;
+        if (!std::binary_search(newSecondary.begin(), newSecondary.end(), satelliteId))
+        {
+            m_secondaryAssociationChangeTrace(groundId, satelliteId, false);
+        }
     }
-    NS_LOG_INFO("t=" << state.now.As(Time::S) << " ground " << groundId << " association "
-                     << oldSatellite << " -> " << newSatellite);
-    m_associationChangeTrace(groundId, oldSatellite, newSatellite);
+    if (newSatellite != oldSatellite)
+    {
+        ++ground.associationChanges;
+        if (oldSatellite != ntn::NO_SATELLITE && newSatellite != ntn::NO_SATELLITE)
+        {
+            ++ground.handovers;
+        }
+        NS_LOG_INFO("t=" << state.now.As(Time::S) << " ground " << groundId << " association "
+                         << oldSatellite << " -> " << newSatellite);
+        m_associationChangeTrace(groundId, oldSatellite, newSatellite);
+    }
+    for (uint32_t satelliteId : newSecondary)
+    {
+        if (!std::binary_search(oldSecondary.begin(), oldSecondary.end(), satelliteId))
+        {
+            m_secondaryAssociationChangeTrace(groundId, satelliteId, true);
+        }
+    }
 }
 
 const NtnLinkManager::GroundEntry&
@@ -396,6 +505,21 @@ int32_t
 NtnLinkManager::GetAssociatedSatellite(uint32_t groundNodeId) const
 {
     return GetGround(groundNodeId).associatedSatellite;
+}
+
+std::vector<uint32_t>
+NtnLinkManager::GetAssociatedSatellites(uint32_t groundNodeId) const
+{
+    const GroundEntry& ground = GetGround(groundNodeId);
+    std::vector<uint32_t> satellites;
+    if (ground.associatedSatellite != ntn::NO_SATELLITE)
+    {
+        satellites.push_back(static_cast<uint32_t>(ground.associatedSatellite));
+    }
+    satellites.insert(satellites.end(),
+                      ground.secondarySatellites.begin(),
+                      ground.secondarySatellites.end());
+    return satellites;
 }
 
 NtnLinkState

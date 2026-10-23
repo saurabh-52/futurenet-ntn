@@ -36,8 +36,13 @@ struct NtnAssociationState
 {
     Time now;                                      //!< Simulation time of the decision
     uint32_t groundId{0};                          //!< Ground terminal node ID
-    int32_t currentSatelliteId{ntn::NO_SATELLITE}; //!< Current association (-1 = none)
+    int32_t currentSatelliteId{ntn::NO_SATELLITE}; //!< Current primary association (-1 = none)
     std::vector<NtnCandidate> visibleCandidates;   //!< Visible satellites, sorted by node ID
+    /// Most satellites the terminal may be associated with at once (MaxAssociationsPerGround):
+    /// the primary plus up to maxAssociations - 1 secondary satellites.
+    uint32_t maxAssociations{ntn::DEFAULT_ASSOCIATIONS_PER_GROUND};
+    /// Current secondary associations, sorted by node ID (empty when maxAssociations = 1).
+    std::vector<uint32_t> currentSecondarySatelliteIds;
 };
 
 /**
@@ -46,9 +51,14 @@ struct NtnAssociationState
  */
 struct NtnAssociationDecision
 {
-    /// Satellite node ID to associate with, or -1 (ntn::NO_SATELLITE) for no association.
-    /// Must be one of the visible candidates; NtnLinkManager rejects anything else.
+    /// Primary satellite node ID, or -1 (ntn::NO_SATELLITE) for no association. The primary
+    /// satellite carries the terminal's traffic (default route). Must be one of the visible
+    /// candidates; NtnLinkManager rejects anything else.
     int32_t satelliteId{ntn::NO_SATELLITE};
+    /// Secondary satellites kept associated as well (links up, but no default route), in any
+    /// order: at most maxAssociations - 1 distinct visible candidates, never the primary, and
+    /// empty when there is no primary.
+    std::vector<uint32_t> secondarySatelliteIds;
 };
 
 /**
@@ -77,6 +87,15 @@ class NtnAssociationPolicy : public Object
      * @return the decision
      */
     virtual NtnAssociationDecision Select(const NtnAssociationState& state) = 0;
+
+  protected:
+    /**
+     * Order candidates from highest to lowest elevation; on equal elevation the lower node ID
+     * comes first, so the result never depends on the input order.
+     * @param candidates the candidates
+     * @return the same candidates, ranked
+     */
+    static std::vector<NtnCandidate> RankByElevation(std::vector<NtnCandidate> candidates);
 };
 
 /**
@@ -84,6 +103,9 @@ class NtnAssociationPolicy : public Object
  * Deterministic baseline policy (SRS M01-FR-06): pick the visible satellite with the highest
  * elevation. A high satellite is usually the closest one and the one that stays in view the
  * longest. Ties go to the lowest node ID so results never depend on container order.
+ *
+ * With MaxAssociationsPerGround = K > 1 the next K - 1 satellites in elevation order become the
+ * secondary associations.
  */
 class HighestElevationPolicy : public NtnAssociationPolicy
 {

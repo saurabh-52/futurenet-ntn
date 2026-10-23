@@ -34,7 +34,8 @@ namespace ns3
  * 2. mark each satellite visible or not (NtnVisibilityModel) and fire VisibilityChange on a
  *    change, plus SlantRangeUpdate and LinkDelayUpdate for every visible satellite;
  * 3. hand the visible candidates to the NtnAssociationPolicy and apply its decision, firing
- *    AssociationChange when the associated satellite changes.
+ *    AssociationChange when the primary satellite changes and SecondaryAssociationChange when a
+ *    secondary satellite is added or removed (only possible with MaxAssociationsPerGround > 1).
  *
  * The manager only computes and reports state. Turning network links up or down is done by
  * whoever listens to the traces (NtnIpLinkController in this module), so other modules can
@@ -105,6 +106,12 @@ class NtnLinkManager : public Object
     /** @return the logical satellite link data rate */
     DataRate GetDataRate() const;
 
+    /** @param maxAssociations most satellites a ground terminal may use at once, 1 - 4 */
+    void SetMaxAssociationsPerGround(uint32_t maxAssociations);
+
+    /** @return the most satellites a ground terminal may use at once */
+    uint32_t GetMaxAssociationsPerGround() const;
+
     /** Run Update() now and then every UpdateInterval until Stop() or the end of the run. */
     void Start();
 
@@ -119,9 +126,16 @@ class NtnLinkManager : public Object
 
     /**
      * @param groundNodeId ground terminal node ID
-     * @return the associated satellite node ID, or -1 if none is visible
+     * @return the primary associated satellite node ID, or -1 if none is visible
      */
     int32_t GetAssociatedSatellite(uint32_t groundNodeId) const;
+
+    /**
+     * @param groundNodeId ground terminal node ID
+     * @return all associated satellites: the primary first, then the secondary ones by node ID;
+     *         empty if none is visible
+     */
+    std::vector<uint32_t> GetAssociatedSatellites(uint32_t groundNodeId) const;
 
     /**
      * @param groundNodeId ground terminal node ID
@@ -187,6 +201,17 @@ class NtnLinkManager : public Object
                                                     int32_t newSatelliteId);
 
     /**
+     * TracedCallback signature for SecondaryAssociationChange.
+     * @param groundId ground terminal node ID
+     * @param satelliteId satellite node ID
+     * @param associated true if the satellite became a secondary association, false if it
+     *        stopped being one
+     */
+    typedef void (*SecondaryAssociationChangeTracedCallback)(uint32_t groundId,
+                                                             uint32_t satelliteId,
+                                                             bool associated);
+
+    /**
      * TracedCallback signature for SlantRangeUpdate.
      * @param groundId ground terminal node ID
      * @param satelliteId satellite node ID
@@ -227,13 +252,24 @@ class NtnLinkManager : public Object
     struct GroundEntry
     {
         NodeEntry entry;                                //!< Node and mobility
-        int32_t associatedSatellite{ntn::NO_SATELLITE}; //!< Current association
+        int32_t associatedSatellite{ntn::NO_SATELLITE}; //!< Current primary association
+        std::vector<uint32_t> secondarySatellites;      //!< Secondary associations, sorted
         uint32_t associationChanges{0};                 //!< Number of AssociationChange events
         uint32_t handovers{0};                          //!< Satellite-to-satellite switches
     };
 
     /** Run one Update() and schedule the next one. */
     void PeriodicUpdate();
+
+    /**
+     * Abort with a clear message if a policy decision breaks the rules of
+     * NtnAssociationDecision (only visible satellites, no duplicates, at most
+     * MaxAssociationsPerGround in total).
+     * @param state the state the policy decided on
+     * @param decision the policy decision
+     */
+    void CheckDecision(const NtnAssociationState& state,
+                       const NtnAssociationDecision& decision) const;
 
     /**
      * Apply a policy decision for one ground terminal.
@@ -274,13 +310,16 @@ class NtnLinkManager : public Object
     Ptr<NtnAssociationPolicy> m_policy;    //!< Association decision
     Time m_updateInterval;                 //!< Time between updates
     DataRate m_dataRate;                   //!< Logical link data rate
+    uint32_t m_maxAssociations;            //!< MaxAssociationsPerGround
     EventId m_updateEvent;                 //!< Next scheduled periodic update
 
     TracedCallback<uint32_t, uint32_t, bool> m_visibilityChangeTrace;    //!< VisibilityChange
     TracedCallback<uint32_t, int32_t, int32_t> m_associationChangeTrace; //!< AssociationChange
-    TracedCallback<uint32_t, uint32_t, double> m_slantRangeUpdateTrace;  //!< SlantRangeUpdate
-    TracedCallback<uint32_t, uint32_t, Time> m_linkDelayUpdateTrace;     //!< LinkDelayUpdate
-    TracedCallback<Time> m_updateCompletedTrace;                         //!< UpdateCompleted
+    /// SecondaryAssociationChange
+    TracedCallback<uint32_t, uint32_t, bool> m_secondaryAssociationChangeTrace;
+    TracedCallback<uint32_t, uint32_t, double> m_slantRangeUpdateTrace; //!< SlantRangeUpdate
+    TracedCallback<uint32_t, uint32_t, Time> m_linkDelayUpdateTrace;    //!< LinkDelayUpdate
+    TracedCallback<Time> m_updateCompletedTrace;                        //!< UpdateCompleted
 };
 
 } // namespace ns3

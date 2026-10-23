@@ -128,6 +128,9 @@ NtnTraceWriter::Connect(Ptr<NtnLinkManager> manager)
         manager->TraceConnectWithoutContext(
             "AssociationChange",
             MakeCallback(&NtnTraceWriter::HandleAssociationChange, this));
+        manager->TraceConnectWithoutContext(
+            "SecondaryAssociationChange",
+            MakeCallback(&NtnTraceWriter::HandleSecondaryAssociationChange, this));
     }
 }
 
@@ -189,6 +192,20 @@ NtnTraceWriter::HandleAssociationChange(uint32_t groundId,
                        << pair.linkDelay.GetSeconds() * MS_PER_S;
     }
     m_eventLogFile << ",old_satellite_id|delay_ms," << detail << '\n';
+}
+
+void
+NtnTraceWriter::HandleSecondaryAssociationChange(uint32_t groundId,
+                                                 uint32_t satelliteId,
+                                                 bool associated)
+{
+    constexpr double MS_PER_S = 1e3;
+    const NtnPairState pair = m_manager->GetPairState(groundId, satelliteId);
+    m_eventLogFile << std::setprecision(TIME_DECIMALS) << Simulator::Now().GetSeconds() << ','
+                   << MODULE_NAME << ",SecondaryAssociationChange," << groundId << ','
+                   << satelliteId << ",," << std::setprecision(VALUE_DECIMALS) << pair.elevationDeg
+                   << ',' << pair.linkDelay.GetSeconds() * MS_PER_S << ",elevation_deg|delay_ms,"
+                   << (associated ? "added" : "removed") << '\n';
 }
 
 } // namespace ns3

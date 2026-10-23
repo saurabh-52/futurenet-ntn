@@ -92,6 +92,14 @@ class NtnTraceWriter : public Object
      */
     void HandleAssociationChange(uint32_t groundId, int32_t oldSatelliteId, int32_t newSatelliteId);
 
+    /**
+     * SecondaryAssociationChange handler.
+     * @param groundId ground terminal node ID
+     * @param satelliteId satellite node ID
+     * @param associated true if added to the secondary associations, false if removed
+     */
+    void HandleSecondaryAssociationChange(uint32_t groundId, uint32_t satelliteId, bool associated);
+
     Ptr<NtnLinkManager> m_manager; //!< Manager being followed
     std::ofstream m_linkStateFile; //!< Link-state CSV
     std::ofstream m_eventLogFile;  //!< Common event log CSV

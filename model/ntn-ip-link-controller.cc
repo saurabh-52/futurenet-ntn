@@ -61,6 +61,9 @@ NtnIpLinkController::Connect(Ptr<NtnLinkManager> manager)
     manager->TraceConnectWithoutContext(
         "AssociationChange",
         MakeCallback(&NtnIpLinkController::HandleAssociationChange, this));
+    manager->TraceConnectWithoutContext(
+        "SecondaryAssociationChange",
+        MakeCallback(&NtnIpLinkController::HandleSecondaryAssociationChange, this));
 }
 
 void
@@ -111,16 +114,33 @@ NtnIpLinkController::GetLink(uint32_t groundId, uint32_t satelliteId) const
 void
 NtnIpLinkController::SetLinkUp(const IpLink& link, bool up)
 {
+    SetInterfaceUp(link.groundIpv4, link.groundInterface, up);
+    SetInterfaceUp(link.satelliteIpv4, link.satelliteInterface, up);
+}
+
+void
+NtnIpLinkController::SetInterfaceUp(Ptr<Ipv4> ipv4, uint32_t interface, bool up)
+{
+    // Only act on a real change: bringing an interface up that is already up would make the
+    // routing protocol add its subnet route a second time.
+    if (ipv4->IsUp(interface) == up)
+    {
+        return;
+    }
     if (up)
     {
-        link.groundIpv4->SetUp(link.groundInterface);
-        link.satelliteIpv4->SetUp(link.satelliteInterface);
+        ipv4->SetUp(interface);
     }
     else
     {
-        link.groundIpv4->SetDown(link.groundInterface);
-        link.satelliteIpv4->SetDown(link.satelliteInterface);
+        ipv4->SetDown(interface);
     }
+}
+
+bool
+NtnIpLinkController::IsAssociated(uint32_t groundId, uint32_t satelliteId) const
+{
+    return m_manager->GetPairState(groundId, satelliteId).associated;
 }
 
 bool
@@ -153,10 +173,12 @@ NtnIpLinkController::HandleAssociationChange(uint32_t groundId,
                                              int32_t newSatelliteId)
 {
     NS_LOG_FUNCTION(this << groundId << oldSatelliteId << newSatelliteId);
-    if (oldSatelliteId != ntn::NO_SATELLITE)
+    // The old primary stays up if it is still a secondary association. Otherwise taking the
+    // interface down also makes ns-3 drop the routes that used it, including the old default
+    // route.
+    if (oldSatelliteId != ntn::NO_SATELLITE &&
+        !IsAssociated(groundId, static_cast<uint32_t>(oldSatelliteId)))
     {
-        // Taking the interface down also makes ns-3 drop the routes that used it, including the
-        // old default route.
         SetLinkUp(GetLink(groundId, static_cast<uint32_t>(oldSatelliteId)), false);
     }
     if (newSatelliteId == ntn::NO_SATELLITE)
@@ -180,6 +202,16 @@ NtnIpLinkController::HandleAssociationChange(uint32_t groundId,
         }
     }
     routing->SetDefaultRoute(link.satelliteAddress, link.groundInterface);
+}
+
+void
+NtnIpLinkController::HandleSecondaryAssociationChange(uint32_t groundId,
+                                                      uint32_t satelliteId,
+                                                      bool associated)
+{
+    NS_LOG_FUNCTION(this << groundId << satelliteId << associated);
+    // A satellite that left the secondary set may have become the primary; keep it up then.
+    SetLinkUp(GetLink(groundId, satelliteId), associated || IsAssociated(groundId, satelliteId));
 }
 
 } // namespace ns3
