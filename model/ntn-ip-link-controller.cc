@@ -44,6 +44,7 @@ NtnIpLinkController::DoDispose()
 {
     NS_LOG_FUNCTION(this);
     m_links.clear();
+    m_gatewayLinks.clear();
     m_manager = nullptr;
     Object::DoDispose();
 }
@@ -64,6 +65,40 @@ NtnIpLinkController::Connect(Ptr<NtnLinkManager> manager)
     manager->TraceConnectWithoutContext(
         "SecondaryAssociationChange",
         MakeCallback(&NtnIpLinkController::HandleSecondaryAssociationChange, this));
+    manager->TraceConnectWithoutContext(
+        "GatewayLinkDelayUpdate",
+        MakeCallback(&NtnIpLinkController::HandleGatewayLinkDelayUpdate, this));
+    manager->TraceConnectWithoutContext(
+        "GatewayAssociationChange",
+        MakeCallback(&NtnIpLinkController::HandleGatewayAssociationChange, this));
+}
+
+NtnIpLinkController::IpLink
+NtnIpLinkController::MakeLink(const std::string& name,
+                              Ptr<PointToPointNetDevice> groundDevice,
+                              Ptr<PointToPointNetDevice> satelliteDevice)
+{
+    NS_ABORT_MSG_IF(!groundDevice || !satelliteDevice, "Null device for link " << name);
+    IpLink link;
+    link.channel = DynamicCast<PointToPointChannel>(groundDevice->GetChannel());
+    NS_ABORT_MSG_IF(!link.channel || link.channel != satelliteDevice->GetChannel(),
+                    "The two devices of link " << name << " must share one point-to-point channel");
+    link.groundIpv4 = groundDevice->GetNode()->GetObject<Ipv4>();
+    link.satelliteIpv4 = satelliteDevice->GetNode()->GetObject<Ipv4>();
+    NS_ABORT_MSG_IF(!link.groundIpv4 || !link.satelliteIpv4,
+                    "Install the Internet stack on both ends of link " << name << " first");
+
+    const int32_t groundInterface = link.groundIpv4->GetInterfaceForDevice(groundDevice);
+    const int32_t satelliteInterface = link.satelliteIpv4->GetInterfaceForDevice(satelliteDevice);
+    NS_ABORT_MSG_IF(groundInterface < 0 || satelliteInterface < 0,
+                    "Assign IPv4 addresses to link " << name << " before registering it");
+    link.groundInterface = static_cast<uint32_t>(groundInterface);
+    link.satelliteInterface = static_cast<uint32_t>(satelliteInterface);
+    const Ipv4InterfaceAddress groundAddress = link.groundIpv4->GetAddress(link.groundInterface, 0);
+    link.groundAddress = groundAddress.GetLocal();
+    link.mask = groundAddress.GetMask();
+    link.satelliteAddress = link.satelliteIpv4->GetAddress(link.satelliteInterface, 0).GetLocal();
+    return link;
 }
 
 void
@@ -73,32 +108,58 @@ NtnIpLinkController::AddLink(uint32_t groundId,
                              Ptr<PointToPointNetDevice> satelliteDevice)
 {
     NS_LOG_FUNCTION(this << groundId << satelliteId);
-    NS_ABORT_MSG_IF(!groundDevice || !satelliteDevice, "Null link device");
     NS_ABORT_MSG_IF(m_links.count({groundId, satelliteId}) != 0,
                     "Link " << groundId << "/" << satelliteId << " is already registered");
-
-    IpLink link;
-    link.channel = DynamicCast<PointToPointChannel>(groundDevice->GetChannel());
-    NS_ABORT_MSG_IF(!link.channel || link.channel != satelliteDevice->GetChannel(),
-                    "The two devices of link " << groundId << "/" << satelliteId
-                                               << " must share one point-to-point channel");
-    link.groundIpv4 = groundDevice->GetNode()->GetObject<Ipv4>();
-    link.satelliteIpv4 = satelliteDevice->GetNode()->GetObject<Ipv4>();
-    NS_ABORT_MSG_IF(!link.groundIpv4 || !link.satelliteIpv4,
-                    "Install the Internet stack on ground terminals and satellites first");
-
-    const int32_t groundInterface = link.groundIpv4->GetInterfaceForDevice(groundDevice);
-    const int32_t satelliteInterface = link.satelliteIpv4->GetInterfaceForDevice(satelliteDevice);
-    NS_ABORT_MSG_IF(groundInterface < 0 || satelliteInterface < 0,
-                    "Assign IPv4 addresses to link " << groundId << "/" << satelliteId
-                                                     << " before registering it");
-    link.groundInterface = static_cast<uint32_t>(groundInterface);
-    link.satelliteInterface = static_cast<uint32_t>(satelliteInterface);
-    link.satelliteAddress = link.satelliteIpv4->GetAddress(link.satelliteInterface, 0).GetLocal();
-
+    IpLink link = MakeLink("ground " + std::to_string(groundId) + " / satellite " +
+                               std::to_string(satelliteId),
+                           groundDevice,
+                           satelliteDevice);
     // Address assignment brings interfaces up; a link may only carry traffic while associated.
     SetLinkUp(link, false);
     m_links[{groundId, satelliteId}] = link;
+}
+
+void
+NtnIpLinkController::AddGatewayLink(uint32_t gatewayId,
+                                    uint32_t satelliteId,
+                                    Ptr<PointToPointNetDevice> gatewayDevice,
+                                    Ptr<PointToPointNetDevice> satelliteDevice)
+{
+    NS_LOG_FUNCTION(this << gatewayId << satelliteId);
+    NS_ABORT_MSG_IF(m_gatewayLinks.count({gatewayId, satelliteId}) != 0,
+                    "Gateway link " << gatewayId << "/" << satelliteId << " is already registered");
+    IpLink link = MakeLink("gateway " + std::to_string(gatewayId) + " / satellite " +
+                               std::to_string(satelliteId),
+                           gatewayDevice,
+                           satelliteDevice);
+    SetLinkUp(link, false);
+    m_gatewayLinks[{gatewayId, satelliteId}] = link;
+}
+
+const NtnIpLinkController::IpLink&
+NtnIpLinkController::GetGatewayLink(uint32_t gatewayId, uint32_t satelliteId) const
+{
+    auto it = m_gatewayLinks.find({gatewayId, satelliteId});
+    NS_ABORT_MSG_IF(it == m_gatewayLinks.end(),
+                    "No IP link registered for gateway " << gatewayId << " / satellite "
+                                                         << satelliteId);
+    return it->second;
+}
+
+bool
+NtnIpLinkController::IsGatewayLinkUp(uint32_t gatewayId, uint32_t satelliteId) const
+{
+    const IpLink& link = GetGatewayLink(gatewayId, satelliteId);
+    return link.groundIpv4->IsUp(link.groundInterface) &&
+           link.satelliteIpv4->IsUp(link.satelliteInterface);
+}
+
+Time
+NtnIpLinkController::GetGatewayChannelDelay(uint32_t gatewayId, uint32_t satelliteId) const
+{
+    TimeValue delay;
+    GetGatewayLink(gatewayId, satelliteId).channel->GetAttribute("Delay", delay);
+    return delay.Get();
 }
 
 const NtnIpLinkController::IpLink&
@@ -188,11 +249,17 @@ NtnIpLinkController::HandleAssociationChange(uint32_t groundId,
 
     const IpLink& link = GetLink(groundId, static_cast<uint32_t>(newSatelliteId));
     SetLinkUp(link, true);
+    SetDefaultRoute(link.groundIpv4, link.satelliteAddress, link.groundInterface);
+}
 
+void
+NtnIpLinkController::SetDefaultRoute(Ptr<Ipv4> ipv4, Ipv4Address nextHop, uint32_t interface)
+{
     Ipv4StaticRoutingHelper routingHelper;
-    Ptr<Ipv4StaticRouting> routing = routingHelper.GetStaticRouting(link.groundIpv4);
-    NS_ABORT_MSG_IF(!routing, "Ground terminal " << groundId << " has no Ipv4StaticRouting");
-    // Remove any remaining default route before adding the one via the new satellite.
+    Ptr<Ipv4StaticRouting> routing = routingHelper.GetStaticRouting(ipv4);
+    NS_ABORT_MSG_IF(!routing,
+                    "Node " << ipv4->GetObject<Node>()->GetId() << " has no Ipv4StaticRouting");
+    // Remove any remaining default route before adding the new one.
     for (uint32_t i = routing->GetNRoutes(); i > 0; --i)
     {
         const Ipv4RoutingTableEntry route = routing->GetRoute(i - 1);
@@ -201,7 +268,7 @@ NtnIpLinkController::HandleAssociationChange(uint32_t groundId,
             routing->RemoveRoute(i - 1);
         }
     }
-    routing->SetDefaultRoute(link.satelliteAddress, link.groundInterface);
+    routing->SetDefaultRoute(nextHop, interface);
 }
 
 void
@@ -212,6 +279,51 @@ NtnIpLinkController::HandleSecondaryAssociationChange(uint32_t groundId,
     NS_LOG_FUNCTION(this << groundId << satelliteId << associated);
     // A satellite that left the secondary set may have become the primary; keep it up then.
     SetLinkUp(GetLink(groundId, satelliteId), associated || IsAssociated(groundId, satelliteId));
+}
+
+void
+NtnIpLinkController::HandleGatewayLinkDelayUpdate(uint32_t gatewayId,
+                                                  uint32_t satelliteId,
+                                                  Time delay)
+{
+    GetGatewayLink(gatewayId, satelliteId).channel->SetAttribute("Delay", TimeValue(delay));
+}
+
+void
+NtnIpLinkController::HandleGatewayAssociationChange(uint32_t satelliteId,
+                                                    int32_t oldGatewayId,
+                                                    int32_t newGatewayId)
+{
+    NS_LOG_FUNCTION(this << satelliteId << oldGatewayId << newGatewayId);
+    if (oldGatewayId != ntn::NO_SATELLITE)
+    {
+        // Also removes the satellite's default route and the old gateway's return routes.
+        SetLinkUp(GetGatewayLink(static_cast<uint32_t>(oldGatewayId), satelliteId), false);
+    }
+    if (newGatewayId == ntn::NO_SATELLITE)
+    {
+        return; // no gateway in view: traffic towards the ground network is dropped
+    }
+    const IpLink& link = GetGatewayLink(static_cast<uint32_t>(newGatewayId), satelliteId);
+    SetLinkUp(link, true);
+    SetDefaultRoute(link.satelliteIpv4, link.groundAddress, link.satelliteInterface);
+
+    // Return path: the gateway reaches every ground terminal link subnet of this satellite
+    // through it. A ground link that is currently down simply drops such packets at the
+    // satellite, as a real network would without coverage.
+    Ipv4StaticRoutingHelper routingHelper;
+    Ptr<Ipv4StaticRouting> gatewayRouting = routingHelper.GetStaticRouting(link.groundIpv4);
+    NS_ABORT_MSG_IF(!gatewayRouting, "Gateway " << newGatewayId << " has no Ipv4StaticRouting");
+    for (const auto& [key, groundLink] : m_links)
+    {
+        if (key.second == satelliteId)
+        {
+            gatewayRouting->AddNetworkRouteTo(groundLink.groundAddress.CombineMask(groundLink.mask),
+                                              groundLink.mask,
+                                              link.satelliteAddress,
+                                              link.groundInterface);
+        }
+    }
 }
 
 } // namespace ns3

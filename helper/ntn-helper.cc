@@ -34,11 +34,14 @@ namespace
 {
 /// Default address owned by every satellite (see NtnHelper::GetSatelliteServiceAddress()).
 const char* const DEFAULT_SERVICE_ADDRESS = "10.255.255.1";
+/// Default address owned by every gateway (see NtnHelper::GetGatewayServiceAddress()).
+const char* const DEFAULT_GATEWAY_SERVICE_ADDRESS = "10.255.254.1";
 } // namespace
 
 NtnHelper::NtnHelper()
     : m_constellation(CreateObject<NtnWalkerConstellation>()),
       m_linkManager(CreateObject<NtnLinkManager>()),
+      m_gatewayServiceAddress(DEFAULT_GATEWAY_SERVICE_ADDRESS),
       m_serviceAddress(DEFAULT_SERVICE_ADDRESS)
 {
     m_orbitFactory.SetTypeId("ns3::CircularOrbitMobilityModel");
@@ -147,6 +150,23 @@ NtnHelper::InstallGroundTerminal(Ptr<Node> node, double latitudeDeg, double long
 }
 
 void
+NtnHelper::InstallGateway(Ptr<Node> node, double latitudeDeg, double longitudeDeg)
+{
+    NS_ABORT_MSG_IF(!node, "Null gateway node");
+    NS_ABORT_MSG_IF(!m_linkManager->GetEnableGateway(),
+                    "Gateways are disabled; call SetLinkAttribute(\"EnableGateway\", "
+                    "BooleanValue(true)) before InstallGateway()");
+    NS_ABORT_MSG_IF(node->GetObject<MobilityModel>(),
+                    "Gateway node " << node->GetId() << " already has a MobilityModel");
+    Ptr<NtnGroundTerminalMobilityModel> mobility =
+        m_groundFactory.Create<NtnGroundTerminalMobilityModel>();
+    mobility->SetLatitude(latitudeDeg);
+    mobility->SetLongitude(longitudeDeg);
+    node->AggregateObject(mobility);
+    m_linkManager->AddGatewayNode(node);
+}
+
+void
 NtnHelper::InstallGroundTerminals(NodeContainer nodes)
 {
     for (auto it = nodes.Begin(); it != nodes.End(); ++it)
@@ -191,6 +211,26 @@ NtnHelper::InstallIpLinks(Ipv4AddressHelper& addresses)
                                     DynamicCast<PointToPointNetDevice>(devices.Get(1)));
         }
     }
+
+    const NodeContainer gateways = m_linkManager->GetGatewayNodes();
+    for (auto gateway = gateways.Begin(); gateway != gateways.End(); ++gateway)
+    {
+        Ptr<Ipv4> ipv4 = (*gateway)->GetObject<Ipv4>();
+        NS_ABORT_MSG_IF(!ipv4,
+                        "Install the Internet stack on the gateways before InstallIpLinks()");
+        // Same trick as for the satellites: every gateway accepts the shared gateway address.
+        ipv4->AddAddress(0, Ipv4InterfaceAddress(m_gatewayServiceAddress, Ipv4Mask::GetOnes()));
+        for (auto sat = satellites.Begin(); sat != satellites.End(); ++sat)
+        {
+            NetDeviceContainer devices = p2p.Install(*gateway, *sat);
+            addresses.Assign(devices);
+            addresses.NewNetwork();
+            m_ipController->AddGatewayLink((*gateway)->GetId(),
+                                           (*sat)->GetId(),
+                                           DynamicCast<PointToPointNetDevice>(devices.Get(0)),
+                                           DynamicCast<PointToPointNetDevice>(devices.Get(1)));
+        }
+    }
     m_ipController->Connect(m_linkManager);
 }
 
@@ -205,6 +245,19 @@ Ipv4Address
 NtnHelper::GetSatelliteServiceAddress() const
 {
     return m_serviceAddress;
+}
+
+void
+NtnHelper::SetGatewayServiceAddress(Ipv4Address address)
+{
+    NS_ABORT_MSG_IF(m_ipController, "Set the gateway service address before InstallIpLinks()");
+    m_gatewayServiceAddress = address;
+}
+
+Ipv4Address
+NtnHelper::GetGatewayServiceAddress() const
+{
+    return m_gatewayServiceAddress;
 }
 
 void

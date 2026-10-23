@@ -128,6 +128,16 @@ class NtnHelper
     void InstallGroundTerminal(Ptr<Node> node, double latitudeDeg, double longitudeDeg);
 
     /**
+     * Place a fixed gateway ground station and register it with the link manager (SRS
+     * M01-FR-11). Requires SetLinkAttribute("EnableGateway", BooleanValue(true)) first. The
+     * gateway uses the same mobility model and GroundHeight as ground terminals.
+     * @param node gateway node
+     * @param latitudeDeg latitude [deg]
+     * @param longitudeDeg longitude [deg]
+     */
+    void InstallGateway(Ptr<Node> node, double latitudeDeg, double longitudeDeg);
+
+    /**
      * Register ground terminals that already have a MobilityModel (e.g. moving terminals).
      * Positions must be Earth-centred Cartesian coordinates in metres.
      * @param nodes ground terminal nodes
@@ -135,10 +145,12 @@ class NtnHelper
     void InstallGroundTerminals(NodeContainer nodes);
 
     /**
-     * Create one point-to-point link per installed ground-satellite pair, with the link
-     * manager's DataRate, assign one subnet per link from `addresses`, and hand the links to an
-     * NtnIpLinkController. Each satellite also gets the shared service address (see
-     * GetSatelliteServiceAddress()). The Internet stack must already be installed.
+     * Create one point-to-point link per installed ground-satellite pair (and per
+     * gateway-satellite pair if gateways are installed), with the link manager's DataRate,
+     * assign one subnet per link from `addresses`, and hand the links to an
+     * NtnIpLinkController. Each satellite also gets the shared satellite service address and
+     * each gateway the shared gateway service address. The Internet stack must already be
+     * installed on all of these nodes.
      * @param addresses address helper; its network/mask defines the per-link subnets
      */
     void InstallIpLinks(Ipv4AddressHelper& addresses);
@@ -151,6 +163,16 @@ class NtnHelper
 
     /** @return the shared satellite service address */
     Ipv4Address GetSatelliteServiceAddress() const;
+
+    /**
+     * @param address address that every gateway owns; traffic a ground terminal sends to it
+     *        travels ground -> primary satellite -> that satellite's gateway. Default
+     *        10.255.254.1.
+     */
+    void SetGatewayServiceAddress(Ipv4Address address);
+
+    /** @return the shared gateway service address */
+    Ipv4Address GetGatewayServiceAddress() const;
 
     /**
      * Write the link-state CSV and/or the common event log. An empty path disables that file.
@@ -201,6 +223,7 @@ class NtnHelper
     Ptr<NtnLinkManager> m_linkManager;             //!< The mechanism
     Ptr<NtnIpLinkController> m_ipController;       //!< Network actuation (after InstallIpLinks)
     Ptr<NtnTraceWriter> m_traceWriter;             //!< File output (after EnableTracing)
+    Ipv4Address m_gatewayServiceAddress;           //!< Address shared by all gateways
     Ipv4Address m_serviceAddress;                  //!< Address shared by all satellites
 };
 
