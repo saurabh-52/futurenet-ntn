@@ -1,6 +1,6 @@
 # futurenet-ntn (M01) — Requirements Traceability
 
-Status after **Phase 1** (Mandatory). Test names refer to test cases in
+Status after **Phase 2** (Mandatory + Recommended). Test names refer to test cases in
 `test/futurenet-ntn-test-suite.cc` (suite `futurenet-ntn`); validation cases are produced by
 `examples/ntn-validation.cc` with results in `doc/validation/`.
 
@@ -17,8 +17,11 @@ Status after **Phase 1** (Mandatory). Test names refer to test cases in
 | M01-FR-07 | M | Re-evaluate every UpdateInterval | `NtnLinkManager::Start/PeriodicUpdate/Update`, Attribute `UpdateInterval` | T3 M01-T03 (moving), T4 | Done |
 | M01-FR-08 | M | TraceSources for visibility/association changes | `VisibilityChange`, `AssociationChange`, `SlantRangeUpdate`, `LinkDelayUpdate` (+ `UpdateCompleted`) | T4 trace sources | Done |
 | M01-FR-09 | M | Configurable logical link DataRate | `NtnLinkManager` Attribute `DataRate`; applied to p2p devices by `NtnHelper::InstallIpLinks` | T1, T2, T6 (arrival time includes tx time at 50 Mbit/s) | Done |
-| M01-FR-10 | R | Multiple orbital planes, phase offsets | `Raan` Attribute exists; multi-plane layout planned | — | Not done (Phase 2) |
-| M01-FR-11 | R | Gateway node and satellite-gateway association | — | — | Not done (Phase 2) |
+| M01-FR-10 | R | Multiple orbital planes, phase offsets | `NtnWalkerConstellation` (`NumOrbitalPlanes`, `PlanePhaseOffset`, `RaanSpread`); `NtnHelper::SetConstellationAttribute`, `InstallSatellites`, `GetOrbitSlot` | `T1 T2 T3 M01-FR-10 ...`; V4 scenario; `ntn-example-constellation` | Done |
+| M01-FR-11 | R | Gateway node and satellite-gateway association | `NtnLinkManager` `EnableGateway`, `AddGatewayNode`, `UpdateGateways`, `GetSatelliteGateway`, `GetEndToEndPath`; traces `GatewayVisibilityChange`/`GatewayAssociationChange`/`GatewayLinkDelayUpdate`; `NtnIpLinkController` gateway links + routes; `NtnHelper::InstallGateway` | `T1 T3 T4 M01-FR-11 ...`, `T6 M01-FR-11 ...`; `ntn-example-constellation` | Done |
+| (R) policy abstraction | R | Selectable policy + second policy, handover comparison | `NtnHelper::SetPolicy`; `StickyAssociationPolicy` | `T3 StickyAssociationPolicy ...`; V4 | Done |
+| (R) MaxAssociationsPerGround | R | 1–4 simultaneous associations, default 1 | `NtnLinkManager` Attribute; primary + secondary decision; `SecondaryAssociationChange` trace; IP controller | `T1 T2 T3 T4 MaxAssociationsPerGround ...` | Done |
+| (R) integration readiness | R | Other modules use only public API, traces, common structs | `doc/futurenet-ntn.rst` → "API for other modules"; `NtnEndToEndPath` | review by M02/M03 teams | Done (review pending) |
 | M01-FR-12 | O | Inter-satellite links | — | — | Not done (Phase 3) |
 
 ## Tests (SRS §11) and Guideline test categories (§9)
@@ -35,6 +38,11 @@ Status after **Phase 1** (Mandatory). Test names refer to test cases in
 | T4 (guideline) | TraceSource / state transitions | `T4 M01-FR-08 trace sources fire with correct arguments` | Done |
 | T6 (guideline) | Integration with standard ns-3 models | `T6 M01-FR-09 packets over IP see the computed delay and data rate` | Done |
 | (prompt) | Orbit period 600 km ≈ 96.5 min | `T3 orbit period at 600 km is 5792.3 s (96.5 min)` | Done (see deviation in technical report) |
+| FR-10 (P2) | Walker layout defaults, range, angles, positions | `T1 T2 T3 M01-FR-10 multi-plane Walker constellation layout` | Done |
+| MaxAssoc (P2) | Default/range, ranking, traces, IP links = association set | `T1 T2 T3 T4 MaxAssociationsPerGround keeps up to 4 satellites associated` | Done |
+| Policy (P2) | Sticky rules, scripted pass vs baseline | `T3 StickyAssociationPolicy stays until the satellite is lost` | Done |
+| FR-11 (P2) | Gateway choice, end-to-end delay, traces, CSV/event rows | `T1 T3 T4 M01-FR-11 gateway association, end-to-end path and traces` | Done |
+| FR-11 (P2) | Real packets ground → satellite → gateway and back | `T6 M01-FR-11 packets go ground -> satellite -> gateway and back` | Done |
 
 ## Validation (SRS §12, Guidelines §10)
 
@@ -45,6 +53,7 @@ Status after **Phase 1** (Mandatory). Test names refer to test cases in
 | V2 (SRS) | One pass: range decreases then increases | `v2-single-pass.csv`; test `V2 V3 AC-05 ...` | PASS | Done |
 | V3 (guideline) | Boundary: MinElevation 0/45°, altitude 200/2000 km | `v3-boundary.csv` | all within one update interval of closed form | Done |
 | V3 (SRS) | Association only to visible satellites | `v3-association-visible.csv`; test `V2 V3 AC-05 ...` | 0 of 68 changes invalid | Done |
+| V4 (Phase 2) | Policy comparison: handovers, delay, coverage | `v4-policy-comparison.csv` | sticky 299 vs baseline 336 handovers; delay 5.48 vs 4.93 ms; equal coverage | Done |
 
 ## Acceptance criteria (SRS §16)
 
@@ -52,7 +61,7 @@ Status after **Phase 1** (Mandatory). Test names refer to test cases in
 |---|---|---|---|
 | AC-01 | Builds cleanly with ns-3.46.1 | Docker image ns-3.46.1 (GCC 13.3); `./ns3 build` with zero module warnings | Done |
 | AC-02 | All M requirements implemented | FR-01 … FR-09 above | Done |
-| AC-03 | Automated tests pass | `./test.py -s futurenet-ntn`: 11/11 test cases PASS | Done |
+| AC-03 | Automated tests pass | `./test.py -s futurenet-ntn`: 17/17 test cases PASS (11 Phase 1 unchanged + 6 Phase 2) | Done |
 | AC-04 | Delay validation numerically correct | V1 (0.43 ns error), T3 M01-T04 (1 ns tolerance), T6 | Done |
 | AC-05 | Handover example shows ≥ 1 association change | `ntn-example-advanced --numGround=20 --numSats=12`: 68 changes, 48 handovers; test `V2 V3 AC-05` | Done |
 | AC-06 | Parameters configurable via Attributes/helper | Attributes table in `doc/futurenet-ntn.rst`; `NtnHelper::Set*Attribute`; example command-line options | Done |
@@ -70,7 +79,7 @@ Status after **Phase 1** (Mandatory). Test names refer to test cases in
 | QG-06 | Public API documented | Doxygen comments on all public classes/methods; `doc/futurenet-ntn.rst` | Done |
 | QG-07 | No ns-3 core modification | All code under `contrib/futurenet-ntn`; nothing in `src/` changed | Done |
 | QG-08 | No name collisions | New types prefixed `Ntn` (SRS-named `CircularOrbitMobilityModel`, `HighestElevationPolicy` kept); TypeIds checked unique at registration; log components prefixed | Done |
-| QG-09 | ≥ 3 validation cases | V1, V2, V3 (+ SRS V2, V3) | Done |
+| QG-09 | ≥ 3 validation cases | V1, V2, V3 (+ SRS V2, V3), V4 (Phase 2) | Done |
 | QG-10 | Limitations documented | AC-07 | Done |
 
 ## Deliverables (Guidelines §17)
@@ -80,7 +89,7 @@ Status after **Phase 1** (Mandatory). Test names refer to test cases in
 | D1 | Module source | `model/`, `helper/` | Done |
 | D2 | CMake integration | `CMakeLists.txt`, `examples/CMakeLists.txt` | Done |
 | D3 | Tests | `test/futurenet-ntn-test-suite.cc` | Done |
-| D4 | ≥ 2 examples | `ntn-example-basic`, `ntn-example-advanced` (+ `ntn-validation`) | Done |
+| D4 | ≥ 2 examples | `ntn-example-basic`, `ntn-example-advanced`, `ntn-example-constellation` (+ `ntn-validation`) | Done |
 | D5 | README + technical docs | `README.md`, `doc/futurenet-ntn.rst`, `setup_guide.md`, `doc/project-walkthrough.md` | Done |
 | D6 | Parameter table | `doc/futurenet-ntn.rst` → Attributes | Done |
 | D7 | Validation results + raw output | `doc/validation/` | Done |

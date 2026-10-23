@@ -9,7 +9,7 @@ a shell in the container: `docker exec -it ntn-dev bash` (see `README.md` for cr
 contrib/futurenet-ntn/tools/run-checks.sh
 ```
 
-Runs configure, build, the test suite, the style check, both examples and all validation
+Runs configure, build, the test suite, the style check, all three examples and all validation
 cases. Expected last line: `All checks finished. Example outputs are in ntn-output/`.
 
 ## 1. Build
@@ -29,7 +29,8 @@ Expected: build finishes without errors or warnings from `contrib/futurenet-ntn`
 ./build/utils/ns3.46.1-test-runner-default --test-name=futurenet-ntn --verbose   # per test case
 ```
 
-Expected: `1 of 1 tests passed`, and 11 lines starting with `PASS` in the verbose run.
+Expected: `1 of 1 tests passed`, and 17 test-case lines starting with `PASS` in the verbose run
+(11 Phase 1 + 6 Phase 2).
 
 ## 3. Basic example — one satellite pass
 
@@ -94,6 +95,35 @@ Show rejection of an invalid value (AC-06 / M01-T02):
 # -> stops with: msg="Invalid value for attribute set (OrbitAltitude) on ns3::CircularOrbitMobilityModel"
 ```
 
+## 4b. Constellation example — Walker planes + gateways (Phase 2)
+
+```bash
+./ns3 run --cwd=demo ntn-example-constellation
+```
+
+Expected (about 12 s):
+
+```text
+Constellation: 120 satellites in 10 planes (12 per plane), 3 gateways, 20 terminals, policy highest, up to 1 association(s) per terminal
+Terminal association changes: 124, handovers: 104, satellite gateway changes: 32
+Uplink   (terminal -> gateway): 23980 sent, 22039 received, mean one-way delay 9.550 ms
+Downlink (gateway -> terminal): 22039 sent, 22039 received, mean one-way delay 9.548 ms
+```
+
+Explain: each echo request goes terminal → satellite → gateway (two hops of ~4–5 ms incl. 1 ms
+processing each); ~8 % of requests are lost while the terminal's satellite has no gateway in view
+or during a handover (no inter-satellite links yet). Every echo that reaches a gateway comes back.
+
+Show the Phase 2 options without recompiling:
+
+```bash
+./ns3 run --cwd=demo "ntn-example-constellation --policy=sticky --maxAssociations=2"
+./ns3 run --cwd=demo "ntn-example-constellation --numSats=60 --numPlanes=6 --numGateways=2"
+./ns3 run --cwd=demo "ntn-example-constellation --numPlanes=7"
+# -> stops with: "120 satellites cannot be divided equally between 7 orbital planes ..."
+grep -m3 Gateway demo/ntn-constellation-events.csv    # gateway rows in the common event log
+```
+
 ## 5. Plot (optional)
 
 ```bash
@@ -109,8 +139,13 @@ satellite over time (handovers are the steps).
 ./ns3 run "ntn-validation --outputDir=contrib/futurenet-ntn/doc/validation"
 ```
 
-Expected: nine `PASS` lines and `ALL VALIDATION CASES PASSED`; V1 prints
-`link delay 3.001385 ms (closed form 3.001385 ms)`.
+Expected: eleven `PASS` lines and `ALL VALIDATION CASES PASSED`; V1 prints
+`link delay 3.001385 ms (closed form 3.001385 ms)`, V4 prints
+
+```text
+V4 ns3::HighestElevationPolicy: 336 handovers, mean elevation 30.93 deg, mean delay 4.927 ms
+V4 ns3::StickyAssociationPolicy: 299 handovers, mean elevation 24.91 deg, mean delay 5.479 ms
+```
 
 ## 7. Reproducibility
 
