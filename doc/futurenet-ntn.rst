@@ -629,7 +629,7 @@ closed-form result where one exists. Raw results are in ``doc/validation/`` toge
 Testing
 *******
 
-``./test.py -s futurenet-ntn`` runs 17 test cases (all QUICK); the first 11 are the unchanged
+``./test.py -s futurenet-ntn`` runs 16 test cases (all QUICK); the first 11 are the unchanged
 Phase 1 cases:
 
 * T1 construction and SRS default values

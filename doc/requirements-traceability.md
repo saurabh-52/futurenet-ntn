@@ -61,7 +61,7 @@ Status after **Phase 2** (Mandatory + Recommended). Test names refer to test cas
 |---|---|---|---|
 | AC-01 | Builds cleanly with ns-3.46.1 | Docker image ns-3.46.1 (GCC 13.3); `./ns3 build` with zero module warnings | Done |
 | AC-02 | All M requirements implemented | FR-01 … FR-09 above | Done |
-| AC-03 | Automated tests pass | `./test.py -s futurenet-ntn`: 17/17 test cases PASS (11 Phase 1 unchanged + 6 Phase 2) | Done |
+| AC-03 | Automated tests pass | `./test.py -s futurenet-ntn`: 16/16 test cases PASS (11 Phase 1 unchanged + 5 Phase 2) | Done |
 | AC-04 | Delay validation numerically correct | V1 (0.43 ns error), T3 M01-T04 (1 ns tolerance), T6 | Done |
 | AC-05 | Handover example shows ≥ 1 association change | `ntn-example-advanced --numGround=20 --numSats=12`: 68 changes, 48 handovers; test `V2 V3 AC-05` | Done |
 | AC-06 | Parameters configurable via Attributes/helper | Attributes table in `doc/futurenet-ntn.rst`; `NtnHelper::Set*Attribute`; example command-line options | Done |
