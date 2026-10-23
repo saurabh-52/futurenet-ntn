@@ -8,6 +8,8 @@ build_lib(
     model/ntn-visibility-model.cc
     model/ntn-association-policy.cc
     model/ntn-link-manager.cc
+    model/ntn-ip-link-controller.cc
+    model/ntn-trace-writer.cc
   HEADER_FILES
     model/circular-orbit-mobility-model.h
     model/ntn-attribute-checkers.h
@@ -18,6 +20,8 @@ build_lib(
     model/ntn-visibility-model.h
     model/ntn-association-policy.h
     model/ntn-link-manager.h
+    model/ntn-ip-link-controller.h
+    model/ntn-trace-writer.h
   LIBRARIES_TO_LINK
     ${libcore}
     ${libmobility}
