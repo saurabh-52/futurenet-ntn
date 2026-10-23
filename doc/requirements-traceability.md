@@ -81,7 +81,7 @@ Status after **Phase 1** (Mandatory). Test names refer to test cases in
 | D2 | CMake integration | `CMakeLists.txt`, `examples/CMakeLists.txt` | Done |
 | D3 | Tests | `test/futurenet-ntn-test-suite.cc` | Done |
 | D4 | ≥ 2 examples | `ntn-example-basic`, `ntn-example-advanced` (+ `ntn-validation`) | Done |
-| D5 | README + technical docs | `README.md`, `doc/futurenet-ntn.rst` | Done |
+| D5 | README + technical docs | `README.md`, `doc/futurenet-ntn.rst`, `setup_guide.md`, `doc/project-walkthrough.md` | Done |
 | D6 | Parameter table | `doc/futurenet-ntn.rst` → Attributes | Done |
 | D7 | Validation results + raw output | `doc/validation/` | Done |
 | D8 | Technical report | `doc/technical-report.md` | Done |
