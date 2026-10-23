@@ -16,6 +16,10 @@
  * - V3 (boundary): MinElevation 0 and 45 deg at altitudes 200 and 2000 km; the simulated
  *   visibility duration and largest visible range are compared to closed form; plus SRS V3:
  *   in a 20-terminal / 12-satellite run every association goes to a visible satellite.
+ * - V4 (policy comparison, Phase 2): the same Walker constellation and terminals run once with
+ *   HighestElevationPolicy and once with StickyAssociationPolicy. Expected: the sticky policy
+ *   makes fewer handovers, the baseline has the lower mean delay (at one altitude the highest
+ *   satellite is always the nearest), and both give the same coverage.
  *
  * Run: ./ns3 run "ntn-validation --outputDir=contrib/futurenet-ntn/doc/validation"
  */
@@ -364,6 +368,121 @@ RunV3(const std::string& dir)
     return ok;
 }
 
+/// Results of one V4 policy run.
+struct PolicyRunResult
+{
+    uint32_t handovers{0};          //!< Satellite-to-satellite switches, all terminals
+    uint32_t associationChanges{0}; //!< All AssociationChange events
+    uint64_t samples{0};            //!< (terminal, update) samples
+    uint64_t coveredSamples{0};     //!< Samples with a primary association
+    double elevationSumDeg{0.0};    //!< Sum of primary elevations over covered samples
+    double delaySumMs{0.0};         //!< Sum of primary link delays over covered samples
+};
+
+/**
+ * V4 helper: run the Walker scenario with one policy and collect handovers, mean elevation and
+ * mean delay of the primary association.
+ * @param policyTypeId policy TypeId name
+ * @return the results
+ */
+PolicyRunResult
+RunPolicyScenario(const std::string& policyTypeId)
+{
+    // Walker delta 53 deg: 120 satellites in 10 planes, F = 1 (offset 360 / 120 = 3 deg). It is
+    // dense enough that terminals usually see two or more satellites; in a sparse constellation
+    // (e.g. 24 satellites) there is rarely a choice and both policies make the same handovers.
+    constexpr uint32_t NUM_SATS = 120;
+    constexpr uint32_t NUM_PLANES = 10;
+    constexpr uint32_t NUM_GROUND = 20;
+    NodeContainer sats;
+    sats.Create(NUM_SATS);
+    NodeContainer grounds;
+    grounds.Create(NUM_GROUND);
+    NtnHelper ntn;
+    ntn.SetConstellationAttribute("NumOrbitalPlanes", UintegerValue(NUM_PLANES));
+    ntn.SetConstellationAttribute("PlanePhaseOffset", DoubleValue(ntn::FULL_CIRCLE_DEG / NUM_SATS));
+    ntn.SetLinkAttribute("UpdateInterval", TimeValue(Seconds(1)));
+    ntn.SetPolicy(policyTypeId);
+    ntn.InstallSatellites(sats);
+    for (uint32_t k = 0; k < NUM_GROUND; ++k)
+    {
+        // Terminals between 45 deg south and 45 deg north, spread around the globe.
+        const double latitudeDeg = -45.0 + 90.0 * k / (NUM_GROUND - 1);
+        const double longitudeDeg = -180.0 + ntn::FULL_CIRCLE_DEG * k / NUM_GROUND;
+        ntn.InstallGroundTerminal(grounds.Get(k), latitudeDeg, longitudeDeg);
+    }
+    Ptr<NtnLinkManager> manager = ntn.GetLinkManager();
+    PolicyRunResult result;
+    manager->TraceConnectWithoutContext(
+        "UpdateCompleted",
+        MakeCallback(+[](NtnLinkManager* m, PolicyRunResult* r, Time) {
+            const NodeContainer nodes = m->GetGroundNodes();
+            for (auto it = nodes.Begin(); it != nodes.End(); ++it)
+            {
+                ++r->samples;
+                const int32_t sat = m->GetAssociatedSatellite((*it)->GetId());
+                if (sat == ntn::NO_SATELLITE)
+                {
+                    continue;
+                }
+                const NtnPairState pair =
+                    m->GetPairState((*it)->GetId(), static_cast<uint32_t>(sat));
+                ++r->coveredSamples;
+                r->elevationSumDeg += pair.elevationDeg;
+                r->delaySumMs += pair.linkDelay.GetSeconds() * MS_PER_S;
+            }
+        }).Bind(PeekPointer(manager), &result));
+    ntn.Start();
+    Simulator::Stop(Seconds(3600));
+    Simulator::Run();
+    for (auto it = grounds.Begin(); it != grounds.End(); ++it)
+    {
+        result.handovers += manager->GetHandoverCount((*it)->GetId());
+        result.associationChanges += manager->GetAssociationChangeCount((*it)->GetId());
+    }
+    Simulator::Destroy();
+    return result;
+}
+
+/**
+ * V4: handover counts of the baseline and the sticky policy on the same scenario.
+ * @param dir output directory
+ * @return true if passed
+ */
+bool
+RunV4(const std::string& dir)
+{
+    std::ofstream out(dir + "/v4-policy-comparison.csv");
+    out << "policy,handovers,association_changes,coverage_fraction,mean_elevation_deg,"
+           "mean_delay_ms\n"
+        << std::fixed << std::setprecision(6);
+    std::map<std::string, PolicyRunResult> results;
+    for (const std::string policy : {"ns3::HighestElevationPolicy", "ns3::StickyAssociationPolicy"})
+    {
+        const PolicyRunResult r = RunPolicyScenario(policy);
+        results[policy] = r;
+        const double covered = static_cast<double>(r.coveredSamples);
+        out << policy << ',' << r.handovers << ',' << r.associationChanges << ','
+            << covered / r.samples << ',' << r.elevationSumDeg / covered << ','
+            << r.delaySumMs / covered << '\n';
+        std::cout << "V4 " << policy << ": " << r.handovers << " handovers, mean elevation "
+                  << std::fixed << std::setprecision(2) << r.elevationSumDeg / covered
+                  << " deg, mean delay " << std::setprecision(3) << r.delaySumMs / covered
+                  << " ms\n";
+    }
+    const PolicyRunResult& base = results["ns3::HighestElevationPolicy"];
+    const PolicyRunResult& sticky = results["ns3::StickyAssociationPolicy"];
+    bool ok = Verdict("V4a sticky policy makes fewer handovers", sticky.handovers < base.handovers);
+    ok = Verdict("V4b baseline has the lower mean delay",
+                 base.delaySumMs / base.coveredSamples <
+                     sticky.delaySumMs / sticky.coveredSamples) &&
+         ok;
+    ok = Verdict("V4c both policies give the same coverage",
+                 base.coveredSamples == sticky.coveredSamples) &&
+         ok;
+    return ok;
+}
+
 } // namespace
 
 int
@@ -372,7 +491,7 @@ main(int argc, char* argv[])
     std::string validationCase = "all";
     std::string outputDir = ".";
     CommandLine cmd(__FILE__);
-    cmd.AddValue("case", "Validation case: V1, V2, V3 or all", validationCase);
+    cmd.AddValue("case", "Validation case: V1, V2, V3, V4 or all", validationCase);
     cmd.AddValue("outputDir", "Directory for the result CSV files (must exist)", outputDir);
     cmd.Parse(argc, argv);
 
@@ -389,6 +508,10 @@ main(int argc, char* argv[])
     if (validationCase == "V3" || validationCase == "all")
     {
         ok = RunV3(outputDir) && ok;
+    }
+    if (validationCase == "V4" || validationCase == "all")
+    {
+        ok = RunV4(outputDir) && ok;
     }
     std::cout << (ok ? "ALL VALIDATION CASES PASSED" : "SOME VALIDATION CASES FAILED") << "\n";
     return ok ? 0 : 1;

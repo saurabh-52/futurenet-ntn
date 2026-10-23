@@ -34,7 +34,13 @@ namespace ns3
  * 2. mark each satellite visible or not (NtnVisibilityModel) and fire VisibilityChange on a
  *    change, plus SlantRangeUpdate and LinkDelayUpdate for every visible satellite;
  * 3. hand the visible candidates to the NtnAssociationPolicy and apply its decision, firing
- *    AssociationChange when the associated satellite changes.
+ *    AssociationChange when the primary satellite changes and SecondaryAssociationChange when a
+ *    secondary satellite is added or removed (only possible with MaxAssociationsPerGround > 1).
+ *
+ * With EnableGateway and registered gateways, each update first does the same geometry for
+ * every gateway-satellite pair and lets each satellite use the visible gateway that sees it
+ * highest (GatewayVisibilityChange, GatewayLinkDelayUpdate, GatewayAssociationChange), so
+ * GetEndToEndPath() gives ground -> satellite -> gateway (SRS M01-FR-11).
  *
  * The manager only computes and reports state. Turning network links up or down is done by
  * whoever listens to the traces (NtnIpLinkController in this module), so other modules can
@@ -69,8 +75,20 @@ class NtnLinkManager : public Object
      */
     void AddSatelliteNode(Ptr<Node> node);
 
+    /**
+     * Register a gateway ground station (SRS M01-FR-11). Requires EnableGateway = true and a
+     * MobilityModel on the node. Every satellite associates with the visible gateway that sees
+     * it at the highest elevation, using the same visibility and delay models as the ground
+     * terminals.
+     * @param node the gateway node
+     */
+    void AddGatewayNode(Ptr<Node> node);
+
     /** @return all registered ground terminals, in registration order */
     NodeContainer GetGroundNodes() const;
+
+    /** @return all registered gateways, in registration order */
+    NodeContainer GetGatewayNodes() const;
 
     /** @return all registered satellites, in registration order */
     NodeContainer GetSatelliteNodes() const;
@@ -105,6 +123,21 @@ class NtnLinkManager : public Object
     /** @return the logical satellite link data rate */
     DataRate GetDataRate() const;
 
+    /** @param maxAssociations most satellites a ground terminal may use at once, 1 - 4 */
+    void SetMaxAssociationsPerGround(uint32_t maxAssociations);
+
+    /** @return the most satellites a ground terminal may use at once */
+    uint32_t GetMaxAssociationsPerGround() const;
+
+    /**
+     * @param enable allow gateways (SRS EnableGateway); cannot be switched off once a gateway
+     *        is registered
+     */
+    void SetEnableGateway(bool enable);
+
+    /** @return true if gateways are enabled */
+    bool GetEnableGateway() const;
+
     /** Run Update() now and then every UpdateInterval until Stop() or the end of the run. */
     void Start();
 
@@ -119,9 +152,16 @@ class NtnLinkManager : public Object
 
     /**
      * @param groundNodeId ground terminal node ID
-     * @return the associated satellite node ID, or -1 if none is visible
+     * @return the primary associated satellite node ID, or -1 if none is visible
      */
     int32_t GetAssociatedSatellite(uint32_t groundNodeId) const;
+
+    /**
+     * @param groundNodeId ground terminal node ID
+     * @return all associated satellites: the primary first, then the secondary ones by node ID;
+     *         empty if none is visible
+     */
+    std::vector<uint32_t> GetAssociatedSatellites(uint32_t groundNodeId) const;
 
     /**
      * @param groundNodeId ground terminal node ID
@@ -152,6 +192,35 @@ class NtnLinkManager : public Object
      * @return position and velocity of the node now (common MobilityState contract)
      */
     NtnMobilityState GetMobilityState(uint32_t nodeId) const;
+
+    /**
+     * @param satelliteNodeId satellite node ID
+     * @return the gateway the satellite is associated with, or -1 if none is visible
+     */
+    int32_t GetSatelliteGateway(uint32_t satelliteNodeId) const;
+
+    /**
+     * @param gatewayNodeId gateway node ID
+     * @param satelliteNodeId satellite node ID
+     * @return geometry and association of the pair from the last update (groundId holds the
+     *         gateway ID; `associated` means the satellite uses this gateway)
+     */
+    NtnPairState GetGatewayPairState(uint32_t gatewayNodeId, uint32_t satelliteNodeId) const;
+
+    /** @return the state of every gateway-satellite pair, ordered by (gateway ID, satellite ID) */
+    std::vector<NtnPairState> GetGatewayPairStates() const;
+
+    /**
+     * @param satelliteNodeId satellite node ID
+     * @return number of GatewayAssociationChange events of this satellite
+     */
+    uint32_t GetGatewayChangeCount(uint32_t satelliteNodeId) const;
+
+    /**
+     * @param groundNodeId ground terminal node ID
+     * @return the current path ground -> primary satellite -> gateway and its delay
+     */
+    NtnEndToEndPath GetEndToEndPath(uint32_t groundNodeId) const;
 
     /**
      * @param groundNodeId ground terminal node ID
@@ -185,6 +254,27 @@ class NtnLinkManager : public Object
     typedef void (*AssociationChangeTracedCallback)(uint32_t groundId,
                                                     int32_t oldSatelliteId,
                                                     int32_t newSatelliteId);
+
+    /**
+     * TracedCallback signature for SecondaryAssociationChange.
+     * @param groundId ground terminal node ID
+     * @param satelliteId satellite node ID
+     * @param associated true if the satellite became a secondary association, false if it
+     *        stopped being one
+     */
+    typedef void (*SecondaryAssociationChangeTracedCallback)(uint32_t groundId,
+                                                             uint32_t satelliteId,
+                                                             bool associated);
+
+    /**
+     * TracedCallback signature for GatewayAssociationChange.
+     * @param satelliteId satellite node ID
+     * @param oldGatewayId previous gateway node ID (-1 = none)
+     * @param newGatewayId new gateway node ID (-1 = none)
+     */
+    typedef void (*GatewayAssociationChangeTracedCallback)(uint32_t satelliteId,
+                                                           int32_t oldGatewayId,
+                                                           int32_t newGatewayId);
 
     /**
      * TracedCallback signature for SlantRangeUpdate.
@@ -227,13 +317,38 @@ class NtnLinkManager : public Object
     struct GroundEntry
     {
         NodeEntry entry;                                //!< Node and mobility
-        int32_t associatedSatellite{ntn::NO_SATELLITE}; //!< Current association
+        int32_t associatedSatellite{ntn::NO_SATELLITE}; //!< Current primary association
+        std::vector<uint32_t> secondarySatellites;      //!< Secondary associations, sorted
         uint32_t associationChanges{0};                 //!< Number of AssociationChange events
         uint32_t handovers{0};                          //!< Satellite-to-satellite switches
     };
 
+    /// Gateway bookkeeping of one satellite.
+    struct SatelliteGatewayEntry
+    {
+        int32_t gateway{ntn::NO_SATELLITE}; //!< Current gateway node ID (-1 = none)
+        uint32_t changes{0};                //!< Number of GatewayAssociationChange events
+    };
+
     /** Run one Update() and schedule the next one. */
     void PeriodicUpdate();
+
+    /**
+     * Update visibility and delay of every gateway-satellite pair and let every satellite pick
+     * the gateway that sees it highest.
+     * @param satellitePositionsM satellite positions, in m_satellites order
+     */
+    void UpdateGateways(const std::vector<Vector>& satellitePositionsM);
+
+    /**
+     * Abort with a clear message if a policy decision breaks the rules of
+     * NtnAssociationDecision (only visible satellites, no duplicates, at most
+     * MaxAssociationsPerGround in total).
+     * @param state the state the policy decided on
+     * @param decision the policy decision
+     */
+    void CheckDecision(const NtnAssociationState& state,
+                       const NtnAssociationDecision& decision) const;
 
     /**
      * Apply a policy decision for one ground terminal.
@@ -268,19 +383,32 @@ class NtnLinkManager : public Object
     std::vector<NodeEntry> m_satellites; //!< Satellites, in registration order
     /// State of every (ground ID, satellite ID) pair; std::map keeps a fixed, sorted order.
     std::map<std::pair<uint32_t, uint32_t>, NtnPairState> m_pairs;
+    std::vector<NodeEntry> m_gateways; //!< Gateways, in registration order
+    /// State of every (gateway ID, satellite ID) pair.
+    std::map<std::pair<uint32_t, uint32_t>, NtnPairState> m_gatewayPairs;
+    /// Gateway association of every satellite, by satellite node ID.
+    std::map<uint32_t, SatelliteGatewayEntry> m_satelliteGateways;
 
     Ptr<NtnVisibilityModel> m_visibility;  //!< Visibility rule
     Ptr<NtnPropagationDelayModel> m_delay; //!< Delay calculation
     Ptr<NtnAssociationPolicy> m_policy;    //!< Association decision
     Time m_updateInterval;                 //!< Time between updates
     DataRate m_dataRate;                   //!< Logical link data rate
+    uint32_t m_maxAssociations;            //!< MaxAssociationsPerGround
+    bool m_enableGateway;                  //!< EnableGateway
     EventId m_updateEvent;                 //!< Next scheduled periodic update
 
     TracedCallback<uint32_t, uint32_t, bool> m_visibilityChangeTrace;    //!< VisibilityChange
     TracedCallback<uint32_t, int32_t, int32_t> m_associationChangeTrace; //!< AssociationChange
-    TracedCallback<uint32_t, uint32_t, double> m_slantRangeUpdateTrace;  //!< SlantRangeUpdate
-    TracedCallback<uint32_t, uint32_t, Time> m_linkDelayUpdateTrace;     //!< LinkDelayUpdate
-    TracedCallback<Time> m_updateCompletedTrace;                         //!< UpdateCompleted
+    /// SecondaryAssociationChange
+    TracedCallback<uint32_t, uint32_t, bool> m_secondaryAssociationChangeTrace;
+    TracedCallback<uint32_t, uint32_t, double> m_slantRangeUpdateTrace;      //!< SlantRangeUpdate
+    TracedCallback<uint32_t, uint32_t, Time> m_linkDelayUpdateTrace;         //!< LinkDelayUpdate
+    TracedCallback<Time> m_updateCompletedTrace;                             //!< UpdateCompleted
+    TracedCallback<uint32_t, uint32_t, bool> m_gatewayVisibilityChangeTrace; //!< Gateway vis.
+    /// GatewayAssociationChange
+    TracedCallback<uint32_t, int32_t, int32_t> m_gatewayAssociationChangeTrace;
+    TracedCallback<uint32_t, uint32_t, Time> m_gatewayLinkDelayUpdateTrace; //!< Gateway delay
 };
 
 } // namespace ns3

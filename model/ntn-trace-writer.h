@@ -22,10 +22,14 @@ namespace ns3
  *
  * 1. Link-state CSV (SRS section 9), one row per ground-satellite pair per sample:
  *    time_s,ground_id,satellite_id,visible,elevation_deg,range_km,delay_ms,associated
- *    delay_ms is the one-way link delay (propagation + processing).
+ *    delay_ms is the one-way link delay (propagation + processing). With gateways, every
+ *    gateway-satellite pair gets a row too, after the ground rows: ground_id then holds the
+ *    gateway node ID and `associated` means "the satellite uses this gateway".
  * 2. Common event log (Common Guidelines section 4.5), one row per event:
  *    time_s,module,event,node_id,peer_id,flow_id,value1,value2,unit,detail
- *    The `unit` column names what value1 and value2 mean, separated by '|'.
+ *    The `unit` column names what value1 and value2 mean, separated by '|'. Events:
+ *    VisibilityChange, AssociationChange, SecondaryAssociationChange, GatewayVisibilityChange
+ *    and GatewayAssociationChange.
  *
  * Either file is optional. Output is fully deterministic (fixed number formatting), so two
  * runs with the same configuration produce byte-identical files.
@@ -91,6 +95,39 @@ class NtnTraceWriter : public Object
      * @param newSatelliteId new satellite (-1 = none)
      */
     void HandleAssociationChange(uint32_t groundId, int32_t oldSatelliteId, int32_t newSatelliteId);
+
+    /**
+     * SecondaryAssociationChange handler.
+     * @param groundId ground terminal node ID
+     * @param satelliteId satellite node ID
+     * @param associated true if added to the secondary associations, false if removed
+     */
+    void HandleSecondaryAssociationChange(uint32_t groundId, uint32_t satelliteId, bool associated);
+
+    /**
+     * GatewayVisibilityChange handler.
+     * @param gatewayId gateway node ID
+     * @param satelliteId satellite node ID
+     * @param visible new visibility
+     */
+    void HandleGatewayVisibilityChange(uint32_t gatewayId, uint32_t satelliteId, bool visible);
+
+    /**
+     * GatewayAssociationChange handler.
+     * @param satelliteId satellite node ID
+     * @param oldGatewayId previous gateway (-1 = none)
+     * @param newGatewayId new gateway (-1 = none)
+     */
+    void HandleGatewayAssociationChange(uint32_t satelliteId,
+                                        int32_t oldGatewayId,
+                                        int32_t newGatewayId);
+
+    /**
+     * Write one link-state CSV row.
+     * @param now sample time
+     * @param pair the pair (ground terminal or gateway with a satellite)
+     */
+    void WriteLinkStateRow(Time now, const NtnPairState& pair);
 
     Ptr<NtnLinkManager> m_manager; //!< Manager being followed
     std::ofstream m_linkStateFile; //!< Link-state CSV

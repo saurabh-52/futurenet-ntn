@@ -13,8 +13,10 @@
 #include "ns3/ntn-ip-link-controller.h"
 #include "ns3/ntn-link-manager.h"
 #include "ns3/ntn-trace-writer.h"
+#include "ns3/ntn-walker-constellation.h"
 #include "ns3/object-factory.h"
 
+#include <map>
 #include <string>
 #include <utility>
 
@@ -52,6 +54,13 @@ class NtnHelper
      * @param value attribute value
      */
     void SetOrbitAttribute(const std::string& name, const AttributeValue& value);
+
+    /**
+     * Set an Attribute of the NtnWalkerConstellation used by InstallSatellites().
+     * @param name attribute name (NumOrbitalPlanes, PlanePhaseOffset, RaanSpread)
+     * @param value attribute value
+     */
+    void SetConstellationAttribute(const std::string& name, const AttributeValue& value);
 
     /**
      * Set an Attribute of the NtnGroundTerminalMobilityModel of terminals installed afterwards.
@@ -95,11 +104,20 @@ class NtnHelper
 
     /**
      * Give each satellite a CircularOrbitMobilityModel and register it with the link manager.
-     * The N satellites share one orbit plane and are spread evenly around it: satellite k gets
-     * InitialPhase = (InitialPhase + k * 360 / N) mod 360.
-     * @param satellites 1 - 200 satellite nodes (SRS NumSatellites)
+     * The N satellites are laid out by the NtnWalkerConstellation: divided equally between
+     * NumOrbitalPlanes planes, spread evenly around each plane, with the plane RAANs fanned out
+     * and PlanePhaseOffset between planes (see NtnWalkerConstellation). With one plane (the
+     * default) satellite k gets InitialPhase = (InitialPhase + k * 360 / N) mod 360.
+     * @param satellites 1 - 200 satellite nodes (SRS NumSatellites); a multiple of
+     *        NumOrbitalPlanes
      */
     void InstallSatellites(NodeContainer satellites);
+
+    /**
+     * @param satelliteNodeId node ID of a satellite installed by InstallSatellites()
+     * @return its plane, slot and orbit angles
+     */
+    NtnOrbitSlot GetOrbitSlot(uint32_t satelliteNodeId) const;
 
     /**
      * Place a fixed ground terminal and register it with the link manager.
@@ -110,6 +128,16 @@ class NtnHelper
     void InstallGroundTerminal(Ptr<Node> node, double latitudeDeg, double longitudeDeg);
 
     /**
+     * Place a fixed gateway ground station and register it with the link manager (SRS
+     * M01-FR-11). Requires SetLinkAttribute("EnableGateway", BooleanValue(true)) first. The
+     * gateway uses the same mobility model and GroundHeight as ground terminals.
+     * @param node gateway node
+     * @param latitudeDeg latitude [deg]
+     * @param longitudeDeg longitude [deg]
+     */
+    void InstallGateway(Ptr<Node> node, double latitudeDeg, double longitudeDeg);
+
+    /**
      * Register ground terminals that already have a MobilityModel (e.g. moving terminals).
      * Positions must be Earth-centred Cartesian coordinates in metres.
      * @param nodes ground terminal nodes
@@ -117,10 +145,12 @@ class NtnHelper
     void InstallGroundTerminals(NodeContainer nodes);
 
     /**
-     * Create one point-to-point link per installed ground-satellite pair, with the link
-     * manager's DataRate, assign one subnet per link from `addresses`, and hand the links to an
-     * NtnIpLinkController. Each satellite also gets the shared service address (see
-     * GetSatelliteServiceAddress()). The Internet stack must already be installed.
+     * Create one point-to-point link per installed ground-satellite pair (and per
+     * gateway-satellite pair if gateways are installed), with the link manager's DataRate,
+     * assign one subnet per link from `addresses`, and hand the links to an
+     * NtnIpLinkController. Each satellite also gets the shared satellite service address and
+     * each gateway the shared gateway service address. The Internet stack must already be
+     * installed on all of these nodes.
      * @param addresses address helper; its network/mask defines the per-link subnets
      */
     void InstallIpLinks(Ipv4AddressHelper& addresses);
@@ -133,6 +163,16 @@ class NtnHelper
 
     /** @return the shared satellite service address */
     Ipv4Address GetSatelliteServiceAddress() const;
+
+    /**
+     * @param address address that every gateway owns; traffic a ground terminal sends to it
+     *        travels ground -> primary satellite -> that satellite's gateway. Default
+     *        10.255.254.1.
+     */
+    void SetGatewayServiceAddress(Ipv4Address address);
+
+    /** @return the shared gateway service address */
+    Ipv4Address GetGatewayServiceAddress() const;
 
     /**
      * Write the link-state CSV and/or the common event log. An empty path disables that file.
@@ -176,12 +216,15 @@ class NtnHelper
     static void WriteRunInfo(const std::string& path, int argc, char* argv[]);
 
   private:
-    ObjectFactory m_orbitFactory;            //!< Creates satellite mobility models
-    ObjectFactory m_groundFactory;           //!< Creates ground terminal mobility models
-    Ptr<NtnLinkManager> m_linkManager;       //!< The mechanism
-    Ptr<NtnIpLinkController> m_ipController; //!< Network actuation (after InstallIpLinks)
-    Ptr<NtnTraceWriter> m_traceWriter;       //!< File output (after EnableTracing)
-    Ipv4Address m_serviceAddress;            //!< Address shared by all satellites
+    ObjectFactory m_orbitFactory;                  //!< Creates satellite mobility models
+    ObjectFactory m_groundFactory;                 //!< Creates ground terminal mobility models
+    Ptr<NtnWalkerConstellation> m_constellation;   //!< Satellite layout over orbital planes
+    std::map<uint32_t, NtnOrbitSlot> m_orbitSlots; //!< Slot of every installed satellite
+    Ptr<NtnLinkManager> m_linkManager;             //!< The mechanism
+    Ptr<NtnIpLinkController> m_ipController;       //!< Network actuation (after InstallIpLinks)
+    Ptr<NtnTraceWriter> m_traceWriter;             //!< File output (after EnableTracing)
+    Ipv4Address m_gatewayServiceAddress;           //!< Address shared by all gateways
+    Ipv4Address m_serviceAddress;                  //!< Address shared by all satellites
 };
 
 } // namespace ns3

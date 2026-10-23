@@ -1,6 +1,6 @@
 # futurenet-ntn (M01) — Technical Report: Design Decisions and Limitations
 
-Deliverable D8. Phase 1 (Mandatory requirements). ns-3.46.1.
+Deliverable D8. Phase 1 (Mandatory) and Phase 2 (Recommended) requirements. ns-3.46.1.
 
 ## 1. Goal
 
@@ -32,6 +32,19 @@ standards conformance.
 | 16 | Link-state CSV sampling interval | Writing every pair every 100 ms would be ~150 MB for 20 × 12 over 20 min; SRS §9 allows sampling. Events are never sampled. |
 | 17 | Run-info file per example run (version, commit, seed, run, command line) | Guidelines §8.3. Commit is captured at configure time (`tools/run-checks.sh` re-configures first). |
 
+### 2.1 Phase 2 decisions
+
+| # | Decision | Reason |
+|---|---|---|
+| 18 | Walker layout in its own class `NtnWalkerConstellation` (Attributes `NumOrbitalPlanes`, `PlanePhaseOffset`, `RaanSpread`), used by `InstallSatellites` | One responsibility (CG-05); planes differ only in RAAN as the prompt asks; RaanSpread covers both Walker delta (360°) and star (180°). One plane reproduces Phase 1 bit for bit. |
+| 19 | N must be a multiple of the number of planes (clear abort otherwise) | A Walker constellation has equal planes; silently uneven planes would surprise users (CG-11). |
+| 20 | Several associations = 1 *primary* + up to 3 *secondary* | The SRS keeps "one active association"; the primary is that one (default route, `AssociationChange` unchanged), so Phase 1 code and traces keep their meaning. Secondary links are kept up for other modules (e.g. make-before-break, multipath). |
+| 21 | The manager stores the whole new association set before firing any trace | Listeners (IP controller, other modules) always see a consistent state; a satellite moving between primary and secondary is never taken down. |
+| 22 | Second policy = `StickyAssociationPolicy` (stay until lost) | It is the policy that actually reduces handovers; a shortest-range policy would behave identically to highest elevation at one altitude. |
+| 23 | Gateway selection is a fixed rule (highest elevation), not a policy object | Keeps the policy interface ground-terminal-centred; documented as an extension point. |
+| 24 | Gateways get a shared "gateway service address"; return routes added on each gateway change | Same idea as the satellite service address. ns-3 deletes routes through a downed interface, so only additions are needed. |
+| 25 | Gateway rows appended to the link-state CSV only when gateways exist | Keeps the SRS §9 header and keeps Phase 1 output byte-identical. |
+
 ## 3. Verification summary
 
 * 11 automated test cases (T1–T6 categories), all passing; a mutation check (adding 5 ns to the
@@ -42,6 +55,12 @@ standards conformance.
   48 handovers.
 * clang-format check (ns-3 `utils/check-style-clang-format.py`, clang-format 20) clean; zero
   compiler warnings from the module.
+* Phase 2: 6 more test cases (17 in total, the 11 Phase 1 cases unchanged and passing). Mutation
+  checks: wrong plane offset, disabled secondary-link handling, sticky policy ignoring the
+  current satellite, missing gateway return routes and lowest-elevation gateway choice each make
+  the suite fail. V1–V3 result files are byte-identical to Phase 1.
+* V4: sticky policy 299 vs 336 handovers (−11 %) at the cost of mean delay 5.48 vs 4.93 ms, same
+  coverage.
 
 ## 4. Limitations
 
@@ -53,7 +72,10 @@ See `doc/futurenet-ntn.rst`, "Scope and Limitations". Most important for users:
 3. No PHY/MAC, Doppler, timing advance or NR numerology; no standards conformance.
 4. Break-before-make, instantaneous handover; in-flight packets on the old link are dropped.
 5. Decisions are quantised to `UpdateInterval`.
-6. Phase 1: single orbit plane; no gateway, no ISLs (planned for Phases 2 and 3).
+6. No inter-satellite links (Phase 3): a satellite without a visible gateway cannot forward
+   traffic towards the ground network; gateways are not interconnected.
+7. The gateway choice is a fixed rule; no satellite or gateway capacity limits.
+8. Secondary associations keep links up but carry no default traffic (no multipath scheduling).
 
 ## 5. Deviations from the SRS / prompt
 
@@ -66,3 +88,5 @@ See `doc/futurenet-ntn.rst`, "Scope and Limitations". Most important for users:
 | `DoSetPosition` | not supported (aborts with message) | Position is a function of orbit parameters/time or lat/lon/height. |
 | Class names `CircularOrbitMobilityModel`, `HighestElevationPolicy` | kept without the `Ntn` prefix | Names are prescribed by the SRS; all other new types are `Ntn`-prefixed (QG-08). |
 | clang-format version | 20 installed from PyPI | ns-3.46.1's style script accepts only clang-format 20; Ubuntu 24.04 ships 18. |
+| `PlanePhaseOffset`, `RaanSpread` | extra Attributes not in the SRS table | SRS FR-10 asks for "configurable initial phase offsets"; RaanSpread allows Walker star layouts. Defaults keep the SRS behaviour. |
+| Policy comparison scenario | 120 satellites / 10 planes | With the 24-satellite layout tried first both policies give identical handover counts (terminals rarely see two satellites), so the comparison would show nothing. |

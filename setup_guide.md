@@ -28,10 +28,10 @@ toolchains such as MinGW GCC 6 **cannot** build it — that is why we use Docker
 
 ## 2. Get the module source
 
-If the team repository is hosted (GitHub/GitLab):
+The team repository is on GitHub:
 
 ```bash
-git clone <your-team-repo-url> futurenet-ntn
+git clone https://github.com/saurabh-52/futurenet-ntn.git futurenet-ntn
 cd futurenet-ntn
 git checkout main
 ```
@@ -162,13 +162,15 @@ module with all cores on an 8 GB machine — the `--enable-modules` list below k
 contrib/futurenet-ntn/tools/run-checks.sh
 ```
 
-It configures, builds, runs the test suite, the clang-format check, both examples and all
-validation cases. Expected highlights:
+It configures, builds, runs the test suite, the clang-format check, all three examples and all
+validation cases (about 30 s after the first build). Expected highlights:
 
 ```text
 1 of 1 tests passed (1 passed, 0 skipped, 0 failed, 0 crashed, 0 valgrind errors)
 - No files detected with bad code formatting
 Total association changes: 68, total handovers: 48
+Terminal association changes: 124, handovers: 104, satellite gateway changes: 32
+V4 ns3::StickyAssociationPolicy: 299 handovers, mean elevation 24.91 deg, mean delay 5.479 ms
 ALL VALIDATION CASES PASSED
 All checks finished. Example outputs are in ntn-output/
 ```
@@ -188,6 +190,8 @@ All checks finished. Example outputs are in ntn-output/
 mkdir -p demo
 ./ns3 run --cwd=demo ntn-example-basic                                     # one satellite pass
 ./ns3 run --cwd=demo "ntn-example-advanced --numGround=20 --numSats=12"    # 20 x 12 demo
+./ns3 run --cwd=demo ntn-example-constellation                             # Phase 2: planes + gateways
+./ns3 run --cwd=demo "ntn-example-constellation --policy=sticky --maxAssociations=2"
 ./ns3 run "ntn-validation --outputDir=contrib/futurenet-ntn/doc/validation"
 
 python3 utils/check-style-clang-format.py contrib/futurenet-ntn           # style check
@@ -244,6 +248,10 @@ results you want to submit, so the run-info files record the new commit ID.
 | `git ... detected dubious ownership` inside the container | mounted folder owned by another user | `git config --global --add safe.directory '*'` inside the container. |
 | Examples not found by `./ns3 run` | configured without examples | Re-run configure with `--enable-examples --enable-tests`. |
 | `Invalid value for attribute set (OrbitAltitude)` | value outside the project range | Expected behaviour (input validation); use 200–2000 km. |
+| `... satellites cannot be divided equally between ... orbital planes` | `numSats` is not a multiple of `numPlanes` | Expected; e.g. 120 satellites with 2, 3, 4, 5, 6, 8, 10, 12, 15 or 20 planes. |
+| `Gateways are disabled; ...` | `InstallGateway()` before `SetLinkAttribute("EnableGateway", BooleanValue(true))` | Enable gateways first. |
+| Test program ends with `SIGSEGV` instead of `FAIL` | a test indexes a result list after a failed check (ns-3 keeps running after a failed assert) | Find the line: `apt-get install -y gdb` in the container, then `LD_LIBRARY_PATH=build/lib gdb -batch -ex run -ex bt --args build/utils/ns3.46.1-test-runner-default --suite=futurenet-ntn`. |
+| `git push` asks for a password / is rejected | not logged in to GitHub, or no write access to the team repository | `gh auth login` (GitHub CLI) or a personal access token; ask the repository owner for access. |
 
 ---
 

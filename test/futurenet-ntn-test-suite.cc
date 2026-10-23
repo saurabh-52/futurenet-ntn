@@ -12,6 +12,7 @@
  * calculator from the formulas in doc/futurenet-ntn.rst (see the comments next to them).
  */
 
+#include "ns3/boolean.h"
 #include "ns3/circular-orbit-mobility-model.h"
 #include "ns3/data-rate.h"
 #include "ns3/double.h"
@@ -29,17 +30,20 @@
 #include "ns3/ntn-propagation-delay-model.h"
 #include "ns3/ntn-trace-writer.h"
 #include "ns3/ntn-visibility-model.h"
+#include "ns3/ntn-walker-constellation.h"
 #include "ns3/packet.h"
 #include "ns3/rng-seed-manager.h"
 #include "ns3/simulator.h"
 #include "ns3/socket.h"
 #include "ns3/test.h"
 #include "ns3/udp-socket-factory.h"
+#include "ns3/uinteger.h"
 
 #include <algorithm>
 #include <fstream>
 #include <functional>
 #include <sstream>
+#include <tuple>
 #include <vector>
 
 using namespace ns3;
@@ -973,6 +977,723 @@ class NtnValidationScenarioTestCase : public TestCase
 
 /**
  * @ingroup futurenet-ntn-tests
+ * T1 / T2 / T3 for M01-FR-10: Walker layout defaults, rejected values, and satellite angles and
+ * positions in a multi-plane constellation (expected values worked out by hand from the
+ * NtnWalkerConstellation formulas).
+ */
+class NtnWalkerConstellationTestCase : public TestCase
+{
+  public:
+    NtnWalkerConstellationTestCase()
+        : TestCase("T1 T2 T3 M01-FR-10 multi-plane Walker constellation layout")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        // T1: defaults keep the single-plane layout of Phase 1.
+        Ptr<NtnWalkerConstellation> walker = CreateObject<NtnWalkerConstellation>();
+        UintegerValue planes;
+        DoubleValue d;
+        walker->GetAttribute("NumOrbitalPlanes", planes);
+        NS_TEST_ASSERT_MSG_EQ(planes.Get(), 1, "NumOrbitalPlanes default must be 1 (SRS)");
+        walker->GetAttribute("PlanePhaseOffset", d);
+        NS_TEST_ASSERT_MSG_EQ(d.Get(), 0.0, "PlanePhaseOffset default must be 0 deg");
+        walker->GetAttribute("RaanSpread", d);
+        NS_TEST_ASSERT_MSG_EQ(d.Get(), 360.0, "RaanSpread default must be 360 deg");
+
+        // T2: out-of-range values are rejected.
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("NumOrbitalPlanes", UintegerValue(0)),
+                              false,
+                              "0 planes rejected");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("NumOrbitalPlanes", UintegerValue(21)),
+                              false,
+                              "21 planes rejected");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("NumOrbitalPlanes", UintegerValue(20)),
+                              true,
+                              "20 planes accepted");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("PlanePhaseOffset", DoubleValue(360.0)),
+                              false,
+                              "PlanePhaseOffset 360 rejected");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("RaanSpread", DoubleValue(0.0)),
+                              false,
+                              "RaanSpread 0 rejected");
+        NS_TEST_EXPECT_MSG_EQ(walker->SetAttributeFailSafe("RaanSpread", DoubleValue(360.1)),
+                              false,
+                              "RaanSpread 360.1 rejected");
+
+        // T3: 6 satellites, 3 planes, offset 20 deg, Raan0 = 10, phase0 = 5. Two satellites per
+        // plane, 180 deg apart; planes 120 deg apart; each plane shifted 20 deg forward.
+        walker->SetNumOrbitalPlanes(3);
+        walker->SetPlanePhaseOffset(20.0);
+        walker->SetRaanSpread(360.0);
+        const double expected[6][4] = {{0, 0, 10, 5},
+                                       {0, 1, 10, 185},
+                                       {1, 0, 130, 25},
+                                       {1, 1, 130, 205},
+                                       {2, 0, 250, 45},
+                                       {2, 1, 250, 225}};
+        for (uint32_t k = 0; k < 6; ++k)
+        {
+            const NtnOrbitSlot slot = walker->GetSlot(k, 6, 10.0, 5.0);
+            NS_TEST_ASSERT_MSG_EQ(slot.planeIndex, expected[k][0], "plane of satellite " << k);
+            NS_TEST_ASSERT_MSG_EQ(slot.slotInPlane, expected[k][1], "slot of satellite " << k);
+            NS_TEST_ASSERT_MSG_EQ_TOL(slot.raanDeg, expected[k][2], 1e-9, "RAAN of " << k);
+            NS_TEST_ASSERT_MSG_EQ_TOL(slot.initialPhaseDeg, expected[k][3], 1e-9, "phase " << k);
+        }
+        // Angles wrap into [0, 360): 300 + 2 * 120 = 540 -> 180.
+        NS_TEST_ASSERT_MSG_EQ_TOL(walker->GetSlot(4, 6, 300.0, 0.0).raanDeg,
+                                  180.0,
+                                  1e-9,
+                                  "RAAN wraps around");
+        // Walker star: planes spread over 180 deg -> RAAN 0, 60, 120.
+        walker->SetRaanSpread(180.0);
+        NS_TEST_ASSERT_MSG_EQ_TOL(walker->GetSlot(5, 6, 0.0, 0.0).raanDeg,
+                                  120.0,
+                                  1e-9,
+                                  "star layout");
+
+        // Through the helper: 6 satellites in 3 planes. At t = 0 a satellite with phase u = 0
+        // sits on its ascending node, i.e. on the equator at longitude = RAAN, whatever the
+        // inclination: position (a cos RAAN, a sin RAAN, 0).
+        NodeContainer sats;
+        sats.Create(6);
+        NtnHelper ntn;
+        ntn.SetConstellationAttribute("NumOrbitalPlanes", UintegerValue(3));
+        ntn.InstallSatellites(sats);
+        for (uint32_t k = 0; k < 6; k += 2)
+        {
+            const NtnOrbitSlot slot = ntn.GetOrbitSlot(sats.Get(k)->GetId());
+            const double raanRad = ntn::DegToRad(k / 2 * 120.0);
+            const Vector position = sats.Get(k)->GetObject<MobilityModel>()->GetPosition();
+            NS_TEST_ASSERT_MSG_EQ(slot.planeIndex, k / 2, "helper plane index");
+            NS_TEST_ASSERT_MSG_EQ_TOL(position.x,
+                                      ORBIT_RADIUS_600_KM_M * std::cos(raanRad),
+                                      POSITION_TOLERANCE_M,
+                                      "x of first satellite in plane " << k / 2);
+            NS_TEST_ASSERT_MSG_EQ_TOL(position.y,
+                                      ORBIT_RADIUS_600_KM_M * std::sin(raanRad),
+                                      POSITION_TOLERANCE_M,
+                                      "y of first satellite in plane " << k / 2);
+            NS_TEST_ASSERT_MSG_EQ_TOL(position.z, 0.0, POSITION_TOLERANCE_M, "on the equator");
+        }
+        Simulator::Destroy();
+    }
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
+ * T1 / T2 / T3 / T4 for MaxAssociationsPerGround: default 1, range 1 - 4, the policy fills the
+ * extra associations by elevation, the trace fires for added/removed secondary satellites, and
+ * the IP links stay consistent with the association set at every update.
+ */
+class NtnMultiAssociationTestCase : public TestCase
+{
+  public:
+    NtnMultiAssociationTestCase()
+        : TestCase("T1 T2 T3 T4 MaxAssociationsPerGround keeps up to 4 satellites associated")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        // T1 / T2
+        Ptr<NtnLinkManager> manager = CreateObject<NtnLinkManager>();
+        UintegerValue max;
+        manager->GetAttribute("MaxAssociationsPerGround", max);
+        NS_TEST_ASSERT_MSG_EQ(max.Get(), 1, "MaxAssociationsPerGround default must be 1 (SRS)");
+        NS_TEST_EXPECT_MSG_EQ(
+            manager->SetAttributeFailSafe("MaxAssociationsPerGround", UintegerValue(0)),
+            false,
+            "0 rejected");
+        NS_TEST_EXPECT_MSG_EQ(
+            manager->SetAttributeFailSafe("MaxAssociationsPerGround", UintegerValue(5)),
+            false,
+            "5 rejected");
+        NS_TEST_EXPECT_MSG_EQ(
+            manager->SetAttributeFailSafe("MaxAssociationsPerGround", UintegerValue(4)),
+            true,
+            "4 accepted");
+
+        // T3 policy: 4 candidates, 3 allowed -> primary = highest, secondary = next two.
+        Ptr<HighestElevationPolicy> policy = CreateObject<HighestElevationPolicy>();
+        NtnAssociationState state;
+        state.maxAssociations = 3;
+        state.visibleCandidates = {{5, 20.0, 1.5e6, Time(0)},
+                                   {3, 60.0, 0.7e6, Time(0)},
+                                   {9, 45.0, 0.9e6, Time(0)},
+                                   {2, 30.0, 1.1e6, Time(0)}};
+        NtnAssociationDecision decision = policy->Select(state);
+        NS_TEST_ASSERT_MSG_EQ(decision.satelliteId, 3, "primary = highest elevation");
+        NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds.size(), 2, "two secondary");
+        if (decision.secondarySatelliteIds.size() == 2)
+        {
+            NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds[0], 9, "second highest");
+            NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds[1], 2, "third highest");
+        }
+        state.maxAssociations = 1;
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).secondarySatelliteIds.size(),
+                              0,
+                              "max 1 -> no secondary (Phase 1 behaviour)");
+
+        // T3 / T4 in the manager: equatorial satellites 2, 8 and 10 deg away from a terminal at
+        // (0, 0) are all visible (limit 15.8 deg at 600 km / 10 deg elevation).
+        Ptr<Node> ground = CreateGroundNode(0.0, 0.0);
+        Ptr<Node> near = CreateSatelliteNode(0.0, 2.0);
+        Ptr<Node> middle = CreateSatelliteNode(0.0, 8.0);
+        Ptr<Node> far = CreateSatelliteNode(0.0, 350.0);
+        const uint32_t g = ground->GetId();
+        manager = CreateObject<NtnLinkManager>();
+        manager->SetMaxAssociationsPerGround(2);
+        manager->AddGroundNode(ground);
+        manager->AddSatelliteNode(near);
+        manager->AddSatelliteNode(middle);
+        manager->AddSatelliteNode(far);
+        m_secondary.clear();
+        manager->TraceConnectWithoutContext(
+            "SecondaryAssociationChange",
+            MakeCallback(&NtnMultiAssociationTestCase::OnSecondary, this));
+        manager->Update();
+        const std::vector<uint32_t> associated = manager->GetAssociatedSatellites(g);
+        NS_TEST_ASSERT_MSG_EQ(associated.size(), 2, "two associations");
+        if (associated.size() == 2)
+        {
+            NS_TEST_ASSERT_MSG_EQ(associated[0], near->GetId(), "primary first");
+            NS_TEST_ASSERT_MSG_EQ(associated[1], middle->GetId(), "then the secondary");
+        }
+        NS_TEST_ASSERT_MSG_EQ(manager->GetAssociatedSatellite(g),
+                              static_cast<int32_t>(near->GetId()),
+                              "GetAssociatedSatellite returns the primary");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetLinkState(g, middle->GetId()).available,
+                              true,
+                              "secondary link is available");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetLinkState(g, far->GetId()).available,
+                              false,
+                              "third satellite is not associated");
+        NS_TEST_ASSERT_MSG_EQ(m_secondary.size(), 1, "one secondary added");
+        if (m_secondary.size() == 1)
+        {
+            NS_TEST_ASSERT_MSG_EQ(m_secondary[0].first, middle->GetId(), "trace satellite ID");
+            NS_TEST_ASSERT_MSG_EQ(m_secondary[0].second, true, "trace: added");
+        }
+        manager->Update();
+        NS_TEST_ASSERT_MSG_EQ(m_secondary.size(), 1, "no change -> no trace");
+        manager->SetMaxAssociationsPerGround(1);
+        manager->Update();
+        NS_TEST_ASSERT_MSG_EQ(m_secondary.size(), 2, "secondary removed");
+        if (m_secondary.size() == 2)
+        {
+            NS_TEST_ASSERT_MSG_EQ(m_secondary[1].second, false, "trace: removed");
+        }
+        NS_TEST_ASSERT_MSG_EQ(manager->GetAssociatedSatellites(g).size(), 1, "back to one");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetAssociationChangeCount(g),
+                              1,
+                              "secondary changes are not primary association changes");
+        Simulator::Destroy();
+
+        // IP links follow the association set: 4 terminals, 24 satellites (15 deg apart, so 2 or
+        // 3 are in view at any time), up to 3 links each.
+        NodeContainer sats;
+        sats.Create(24);
+        NodeContainer grounds;
+        grounds.Create(4);
+        NtnHelper ntn;
+        ntn.SetLinkAttribute("MaxAssociationsPerGround", UintegerValue(3));
+        ntn.SetLinkAttribute("UpdateInterval", TimeValue(Seconds(1)));
+        ntn.InstallSatellites(sats);
+        for (uint32_t k = 0; k < grounds.GetN(); ++k)
+        {
+            const auto [lat, lon] = NtnHelper::GetGroundTrackPoint(k * 90.0, 1.0, 53.0, 0.0);
+            ntn.InstallGroundTerminal(grounds.Get(k), lat, lon);
+        }
+        InternetStackHelper internet;
+        internet.Install(sats);
+        internet.Install(grounds);
+        Ipv4AddressHelper addresses("10.0.0.0", "255.255.255.252");
+        ntn.InstallIpLinks(addresses);
+        m_helper = &ntn;
+        m_inconsistentLinks = 0;
+        m_maxAssociated = 0;
+        m_secondary.clear();
+        ntn.GetLinkManager()->TraceConnectWithoutContext(
+            "UpdateCompleted",
+            MakeCallback(&NtnMultiAssociationTestCase::OnUpdate, this));
+        ntn.GetLinkManager()->TraceConnectWithoutContext(
+            "SecondaryAssociationChange",
+            MakeCallback(&NtnMultiAssociationTestCase::OnSecondary, this));
+        ntn.Start();
+        Simulator::Stop(Seconds(1200));
+        Simulator::Run();
+        Simulator::Destroy();
+        m_helper = nullptr;
+
+        NS_TEST_ASSERT_MSG_EQ(m_inconsistentLinks, 0, "link up <=> pair associated");
+        NS_TEST_ASSERT_MSG_EQ(m_maxAssociated, 3, "terminals reach 3 associations");
+        NS_TEST_ASSERT_MSG_GT(m_secondary.size(), 0, "secondary set changes over time");
+    }
+
+    /**
+     * SecondaryAssociationChange sink.
+     * @param groundId ground ID
+     * @param satelliteId satellite ID
+     * @param associated added or removed
+     */
+    void OnSecondary(uint32_t groundId, uint32_t satelliteId, bool associated)
+    {
+        m_secondary.emplace_back(satelliteId, associated);
+    }
+
+    /**
+     * UpdateCompleted sink: every IP link must be up exactly when its pair is associated, and
+     * no terminal may exceed MaxAssociationsPerGround.
+     * @param now update time
+     */
+    void OnUpdate(Time now)
+    {
+        Ptr<NtnLinkManager> manager = m_helper->GetLinkManager();
+        Ptr<NtnIpLinkController> controller = m_helper->GetIpLinkController();
+        for (const auto& pair : manager->GetPairStates())
+        {
+            if (controller->IsLinkUp(pair.groundId, pair.satelliteId) != pair.associated)
+            {
+                ++m_inconsistentLinks;
+            }
+        }
+        const NodeContainer grounds = manager->GetGroundNodes();
+        for (auto it = grounds.Begin(); it != grounds.End(); ++it)
+        {
+            const auto n =
+                static_cast<uint32_t>(manager->GetAssociatedSatellites((*it)->GetId()).size());
+            m_maxAssociated = std::max(m_maxAssociated, n);
+        }
+    }
+
+    std::vector<std::pair<uint32_t, bool>> m_secondary; //!< SecondaryAssociationChange arguments
+    NtnHelper* m_helper{nullptr};                       //!< Helper of the running scenario
+    uint32_t m_inconsistentLinks{0};                    //!< Link state != association state
+    uint32_t m_maxAssociated{0};                        //!< Most associations seen at once
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
+ * T3 for the second policy: StickyAssociationPolicy keeps a visible satellite, promotes a
+ * secondary one when the primary is lost, and in a scripted two-satellite pass makes one
+ * handover fewer than the baseline. It is selectable by name through NtnHelper::SetPolicy.
+ */
+class NtnStickyPolicyTestCase : public TestCase
+{
+  public:
+    NtnStickyPolicyTestCase()
+        : TestCase("T3 StickyAssociationPolicy stays until the satellite is lost")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        Ptr<StickyAssociationPolicy> policy = CreateObject<StickyAssociationPolicy>();
+        NtnAssociationState state;
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).satelliteId,
+                              ntn::NO_SATELLITE,
+                              "no candidates -> no association");
+        state.visibleCandidates = {{5, 20.0, 1.5e6, Time(0)},
+                                   {3, 60.0, 0.7e6, Time(0)},
+                                   {9, 45.0, 0.9e6, Time(0)}};
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).satelliteId, 3, "no current -> highest");
+        state.currentSatelliteId = 5;
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).satelliteId, 5, "current still visible");
+        state.currentSatelliteId = 7;
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).satelliteId, 3, "current lost -> highest");
+
+        // Primary 7 lost, secondaries 5 and 9 still visible: promote 9 (higher of the two),
+        // keep 5, and fill the third place with the highest remaining satellite, 3.
+        state.maxAssociations = 3;
+        state.currentSecondarySatelliteIds = {5, 9};
+        NtnAssociationDecision decision = policy->Select(state);
+        NS_TEST_ASSERT_MSG_EQ(decision.satelliteId, 9, "highest secondary is promoted");
+        NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds.size(), 2, "two secondary");
+        if (decision.secondarySatelliteIds.size() == 2)
+        {
+            NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds[0], 5, "kept secondary");
+            NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds[1], 3, "new secondary");
+        }
+
+        // Scripted pass over a terminal at (0, 0), equatorial orbits moving east at
+        // w = 360 / 5792.3 s = 0.0622 deg/s. Satellite A starts 2 deg past the zenith, B 8 deg
+        // before it. After 80 s (5 deg) B is 3 deg away and A 7 deg: the baseline hands over to
+        // B, the sticky policy keeps A. After 240 s A is 16.9 deg away, beyond the 15.8 deg
+        // visibility limit, so the sticky policy now hands over to B as well.
+        const auto [baseAt80, baseAt240, baseHandovers] = RunPass("ns3::HighestElevationPolicy");
+        const auto [stickyAt80, stickyAt240, stickyHandovers] =
+            RunPass("ns3::StickyAssociationPolicy");
+        NS_TEST_ASSERT_MSG_EQ(baseAt80, 1, "baseline: B at 80 s");
+        NS_TEST_ASSERT_MSG_EQ(stickyAt80, 0, "sticky: still A at 80 s");
+        NS_TEST_ASSERT_MSG_EQ(baseAt240, 1, "baseline: B at 240 s");
+        NS_TEST_ASSERT_MSG_EQ(stickyAt240, 1, "sticky: B once A is lost");
+        NS_TEST_ASSERT_MSG_EQ(baseHandovers, 1, "baseline: one handover");
+        NS_TEST_ASSERT_MSG_EQ(stickyHandovers, 1, "sticky: one handover, later");
+    }
+
+    /**
+     * Run the two-satellite pass with one policy, updating at 0, 80 and 240 s.
+     * @param policyTypeId policy TypeId name
+     * @return (satellite index at 80 s, satellite index at 240 s, handovers); index 0 = A,
+     *         1 = B, -1 = none
+     */
+    std::tuple<int, int, uint32_t> RunPass(const std::string& policyTypeId)
+    {
+        NodeContainer sats;
+        sats.Create(2);
+        NodeContainer grounds;
+        grounds.Create(1);
+        NtnHelper ntn;
+        ntn.SetOrbitAttribute("OrbitInclination", DoubleValue(0.0));
+        ntn.SetOrbitAttribute("InitialPhase", DoubleValue(2.0));
+        ntn.SetPolicy(policyTypeId);
+        ntn.InstallSatellites(sats); // A at 2 deg, B at 2 + 180 deg: move B by hand below
+        sats.Get(1)->GetObject<CircularOrbitMobilityModel>()->SetInitialPhase(352.0);
+        ntn.InstallGroundTerminal(grounds.Get(0), 0.0, 0.0);
+        Ptr<NtnLinkManager> manager = ntn.GetLinkManager();
+        const uint32_t g = grounds.Get(0)->GetId();
+        auto index = [&]() {
+            const int32_t sat = manager->GetAssociatedSatellite(g);
+            if (sat == ntn::NO_SATELLITE)
+            {
+                return -1;
+            }
+            return sat == static_cast<int32_t>(sats.Get(0)->GetId()) ? 0 : 1;
+        };
+        int at80 = -2;
+        int at240 = -2;
+        Simulator::ScheduleNow(&NtnLinkManager::Update, manager);
+        Simulator::Schedule(Seconds(80), [&]() {
+            manager->Update();
+            at80 = index();
+        });
+        Simulator::Schedule(Seconds(240), [&]() {
+            manager->Update();
+            at240 = index();
+        });
+        Simulator::Run();
+        const uint32_t handovers = manager->GetHandoverCount(g);
+        Simulator::Destroy();
+        return {at80, at240, handovers};
+    }
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
+ * T1 / T3 / T4 for M01-FR-11: EnableGateway defaults to false, a satellite picks the gateway
+ * that sees it highest, the end-to-end delay is the sum of both hops, and the gateway traces and
+ * output rows appear during a pass.
+ */
+class NtnGatewayTestCase : public TestCase
+{
+  public:
+    NtnGatewayTestCase()
+        : TestCase("T1 T3 T4 M01-FR-11 gateway association, end-to-end path and traces")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        BooleanValue enabled;
+        CreateObject<NtnLinkManager>()->GetAttribute("EnableGateway", enabled);
+        NS_TEST_ASSERT_MSG_EQ(enabled.Get(), false, "EnableGateway default must be false (SRS)");
+
+        // T3: satellite overhead of (0, 0) at t = 0; gateways 5 deg east and 10 deg west of it.
+        Ptr<Node> ground = CreateGroundNode(0.0, 0.0);
+        Ptr<Node> gatewayNear = CreateGroundNode(0.0, 5.0);
+        Ptr<Node> gatewayFar = CreateGroundNode(0.0, -10.0);
+        Ptr<Node> sat = CreateSatelliteNode(0.0, 0.0);
+        const uint32_t s = sat->GetId();
+        Ptr<NtnLinkManager> manager = CreateObject<NtnLinkManager>();
+        manager->SetEnableGateway(true);
+        manager->AddGroundNode(ground);
+        manager->AddSatelliteNode(sat);
+        manager->AddGatewayNode(gatewayFar);
+        manager->AddGatewayNode(gatewayNear);
+        NS_TEST_ASSERT_MSG_EQ(manager->GetSatelliteGateway(s), ntn::NO_SATELLITE, "before update");
+        manager->Update();
+        NS_TEST_ASSERT_MSG_EQ(manager->GetSatelliteGateway(s),
+                              static_cast<int32_t>(gatewayNear->GetId()),
+                              "the nearer (higher) gateway is chosen");
+        NS_TEST_ASSERT_MSG_EQ(manager->GetGatewayPairState(gatewayFar->GetId(), s).visible,
+                              true,
+                              "the other gateway is visible but not chosen");
+
+        // End-to-end delay = (|ground - sat| + |gateway - sat|) / c + 2 x 1 ms processing.
+        const Vector satPositionM = sat->GetObject<MobilityModel>()->GetPosition();
+        const double groundRangeM =
+            CalculateDistance(ground->GetObject<MobilityModel>()->GetPosition(), satPositionM);
+        const double gatewayRangeM =
+            CalculateDistance(gatewayNear->GetObject<MobilityModel>()->GetPosition(), satPositionM);
+        const double expectedS =
+            (groundRangeM + gatewayRangeM) / ntn::SPEED_OF_LIGHT_M_PER_S + 2e-3;
+        const NtnEndToEndPath path = manager->GetEndToEndPath(ground->GetId());
+        NS_TEST_ASSERT_MSG_EQ(path.available, true, "path exists");
+        NS_TEST_ASSERT_MSG_EQ(path.satelliteId, static_cast<int32_t>(s), "path satellite");
+        NS_TEST_ASSERT_MSG_EQ(path.gatewayId,
+                              static_cast<int32_t>(gatewayNear->GetId()),
+                              "path gateway");
+        NS_TEST_ASSERT_MSG_EQ_TOL(path.totalDelay.GetSeconds(),
+                                  expectedS,
+                                  ONE_NS_S,
+                                  "end-to-end delay = sum of both hops");
+        Simulator::Destroy();
+
+        // T4: one pass of an equatorial satellite over a gateway at (0, 10) with tracing on.
+        // The helper owns the CSV writer; the files are complete once it goes out of scope.
+        const std::string linkPath = CreateTempDirFilename("gateway-link.csv");
+        const std::string eventPath = CreateTempDirFilename("gateway-events.csv");
+        uint32_t g = 0;
+        int32_t satId = 0;
+        uint32_t gatewayChanges = 0;
+        {
+            NodeContainer sats;
+            sats.Create(1);
+            NodeContainer gateways;
+            gateways.Create(1);
+            NtnHelper ntn;
+            ntn.SetOrbitAttribute("OrbitInclination", DoubleValue(0.0));
+            ntn.SetOrbitAttribute("InitialPhase", DoubleValue(340.0));
+            ntn.SetLinkAttribute("EnableGateway", BooleanValue(true));
+            ntn.SetLinkAttribute("UpdateInterval", TimeValue(Seconds(1)));
+            ntn.InstallSatellites(sats);
+            ntn.InstallGateway(gateways.Get(0), 0.0, 10.0);
+            ntn.EnableTracing(linkPath, eventPath, Seconds(100));
+            m_visibility = 0;
+            m_gatewayChanges.clear();
+            ntn.GetLinkManager()->TraceConnectWithoutContext(
+                "GatewayVisibilityChange",
+                MakeCallback(&NtnGatewayTestCase::OnVisibility, this));
+            ntn.GetLinkManager()->TraceConnectWithoutContext(
+                "GatewayAssociationChange",
+                MakeCallback(&NtnGatewayTestCase::OnGatewayChange, this));
+            ntn.Start();
+            Simulator::Stop(Seconds(1000));
+            Simulator::Run();
+            g = gateways.Get(0)->GetId();
+            satId = static_cast<int32_t>(sats.Get(0)->GetId());
+            gatewayChanges = ntn.GetLinkManager()->GetGatewayChangeCount(satId);
+            Simulator::Destroy();
+        }
+        NS_TEST_ASSERT_MSG_EQ(gatewayChanges, 2, "gateway change counter");
+        NS_TEST_ASSERT_MSG_EQ(m_visibility, 2, "GatewayVisibilityChange: rise and set");
+        NS_TEST_ASSERT_MSG_EQ(m_gatewayChanges.size(), 2, "GatewayAssociationChange: 2 events");
+        if (m_gatewayChanges.size() == 2)
+        {
+            NS_TEST_ASSERT_MSG_EQ(std::get<0>(m_gatewayChanges[0]), satId, "satellite argument");
+            NS_TEST_ASSERT_MSG_EQ(std::get<1>(m_gatewayChanges[0]),
+                                  ntn::NO_SATELLITE,
+                                  "acquire old");
+            NS_TEST_ASSERT_MSG_EQ(std::get<2>(m_gatewayChanges[0]), static_cast<int32_t>(g), "new");
+            NS_TEST_ASSERT_MSG_EQ(std::get<1>(m_gatewayChanges[1]),
+                                  static_cast<int32_t>(g),
+                                  "lose");
+            NS_TEST_ASSERT_MSG_EQ(std::get<2>(m_gatewayChanges[1]), ntn::NO_SATELLITE, "lose new");
+        }
+
+        const std::string events = ReadFile(eventPath);
+        NS_TEST_ASSERT_MSG_NE(events.find(",futurenet-ntn,GatewayAssociationChange," +
+                                          std::to_string(satId) + "," + std::to_string(g) +
+                                          ",,-1,"),
+                              std::string::npos,
+                              "event-log row for the gateway acquisition");
+        NS_TEST_ASSERT_MSG_NE(events.find(",futurenet-ntn,GatewayVisibilityChange,"),
+                              std::string::npos,
+                              "event-log row for gateway visibility");
+        NS_TEST_ASSERT_MSG_NE(ReadFile(linkPath).find("\n0.000000," + std::to_string(g) + "," +
+                                                      std::to_string(satId) + ","),
+                              std::string::npos,
+                              "link-state CSV has the gateway-satellite row");
+    }
+
+    /**
+     * GatewayVisibilityChange sink.
+     * @param gatewayId gateway ID
+     * @param satelliteId satellite ID
+     * @param visible new state
+     */
+    void OnVisibility(uint32_t gatewayId, uint32_t satelliteId, bool visible)
+    {
+        ++m_visibility;
+    }
+
+    /**
+     * GatewayAssociationChange sink.
+     * @param satelliteId satellite ID
+     * @param oldId previous gateway
+     * @param newId new gateway
+     */
+    void OnGatewayChange(uint32_t satelliteId, int32_t oldId, int32_t newId)
+    {
+        m_gatewayChanges.emplace_back(static_cast<int32_t>(satelliteId), oldId, newId);
+    }
+
+    uint32_t m_visibility{0}; //!< GatewayVisibilityChange count
+    /// GatewayAssociationChange arguments (satellite, old gateway, new gateway)
+    std::vector<std::tuple<int32_t, int32_t, int32_t>> m_gatewayChanges;
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
+ * T6 for M01-FR-11: a UDP packet travels ground -> satellite -> gateway over real IP links and
+ * arrives exactly after both transmission times and both link delays; the gateway's reply comes
+ * back the same way.
+ */
+class NtnGatewayIntegrationTestCase : public TestCase
+{
+  public:
+    NtnGatewayIntegrationTestCase()
+        : TestCase("T6 M01-FR-11 packets go ground -> satellite -> gateway and back")
+    {
+    }
+
+  private:
+    /**
+     * Gateway receive handler: record the arrival and send the packet back to its source.
+     * @param socket gateway socket
+     */
+    void GatewayReceive(Ptr<Socket> socket)
+    {
+        Address from;
+        while (Ptr<Packet> packet = socket->RecvFrom(from))
+        {
+            m_gatewayRxTimes.push_back(Simulator::Now());
+            const NtnEndToEndPath path = m_manager->GetEndToEndPath(m_groundId);
+            m_expectedReplyTimes.push_back(Simulator::Now() + TxTime() + path.gatewayLinkDelay +
+                                           TxTime() + path.groundLinkDelay);
+            socket->SendTo(packet, 0, from);
+        }
+    }
+
+    /**
+     * Ground receive handler: record the arrival of a reply.
+     * @param socket ground socket
+     */
+    void GroundReceive(Ptr<Socket> socket)
+    {
+        while (socket->Recv())
+        {
+            m_replyTimes.push_back(Simulator::Now());
+        }
+    }
+
+    /**
+     * Send one packet from the ground terminal to the gateway service address.
+     * @param socket ground socket
+     * @param destination gateway service address and port
+     */
+    void Send(Ptr<Socket> socket, InetSocketAddress destination)
+    {
+        const NtnEndToEndPath path = m_manager->GetEndToEndPath(m_groundId);
+        m_expectedGatewayRxTimes.push_back(Simulator::Now() + TxTime() + path.groundLinkDelay +
+                                           TxTime() + path.gatewayLinkDelay);
+        socket->SendTo(Create<Packet>(PAYLOAD_BYTES), 0, destination);
+    }
+
+    /** @return transmission time of one packet on one link */
+    Time TxTime() const
+    {
+        // On-the-wire size: payload + UDP (8) + IPv4 (20) + PPP (2) bytes.
+        return m_dataRate.CalculateBytesTxTime(PAYLOAD_BYTES + 8 + 20 + 2);
+    }
+
+    void DoRun() override
+    {
+        NodeContainer sats;
+        sats.Create(1);
+        NodeContainer grounds;
+        grounds.Create(1);
+        NodeContainer gateways;
+        gateways.Create(1);
+        NtnHelper helper;
+        m_dataRate = DataRate("20Mbps");
+        helper.SetOrbitAttribute("OrbitInclination", DoubleValue(0.0));
+        helper.SetLinkAttribute("DataRate", DataRateValue(m_dataRate));
+        helper.SetLinkAttribute("EnableGateway", BooleanValue(true));
+        helper.InstallSatellites(sats); // overhead of (0, 0) at t = 0, moving east
+        helper.InstallGroundTerminal(grounds.Get(0), 0.0, 0.0);
+        helper.InstallGateway(gateways.Get(0), 0.0, 6.0);
+        InternetStackHelper internet;
+        internet.Install(sats);
+        internet.Install(grounds);
+        internet.Install(gateways);
+        Ipv4AddressHelper addresses("10.0.0.0", "255.255.255.252");
+        helper.InstallIpLinks(addresses);
+        helper.Start();
+        m_manager = helper.GetLinkManager();
+        m_groundId = grounds.Get(0)->GetId();
+
+        const uint16_t port = 9;
+        Ptr<Socket> gatewaySocket =
+            Socket::CreateSocket(gateways.Get(0), UdpSocketFactory::GetTypeId());
+        gatewaySocket->Bind(InetSocketAddress(Ipv4Address::GetAny(), port));
+        gatewaySocket->SetRecvCallback(
+            MakeCallback(&NtnGatewayIntegrationTestCase::GatewayReceive, this));
+        Ptr<Socket> groundSocket =
+            Socket::CreateSocket(grounds.Get(0), UdpSocketFactory::GetTypeId());
+        groundSocket->Bind();
+        groundSocket->SetRecvCallback(
+            MakeCallback(&NtnGatewayIntegrationTestCase::GroundReceive, this));
+        const InetSocketAddress destination(helper.GetGatewayServiceAddress(), port);
+        // Sent just after an update, so the whole round trip happens before the next one.
+        for (double sendS : {0.51, 60.01, 150.01})
+        {
+            Simulator::Schedule(Seconds(sendS),
+                                &NtnGatewayIntegrationTestCase::Send,
+                                this,
+                                groundSocket,
+                                destination);
+        }
+        Simulator::Stop(Seconds(151));
+        Simulator::Run();
+
+        // Collect everything, then clean up before checking: a failed check returns at once,
+        // and must not leave scheduled events behind for the next test case.
+        const uint32_t s = sats.Get(0)->GetId();
+        const uint32_t gw = gateways.Get(0)->GetId();
+        const bool gatewayLinkUp = helper.GetIpLinkController()->IsGatewayLinkUp(gw, s);
+        const Time channelDelay = helper.GetIpLinkController()->GetGatewayChannelDelay(gw, s);
+        const Time pairDelay = m_manager->GetGatewayPairState(gw, s).linkDelay;
+        Simulator::Destroy();
+        m_manager = nullptr;
+
+        NS_TEST_ASSERT_MSG_EQ(gatewayLinkUp, true, "gateway link is up");
+        NS_TEST_ASSERT_MSG_EQ(channelDelay,
+                              pairDelay,
+                              "gateway channel Delay follows the computed delay");
+        NS_TEST_ASSERT_MSG_EQ(m_gatewayRxTimes.size(), 3, "all packets reach the gateway");
+        NS_TEST_ASSERT_MSG_EQ(m_replyTimes.size(), 3, "all replies reach the ground terminal");
+        for (std::size_t i = 0; i < m_gatewayRxTimes.size() && i < m_replyTimes.size(); ++i)
+        {
+            NS_TEST_ASSERT_MSG_EQ_TOL(m_gatewayRxTimes[i].GetSeconds(),
+                                      m_expectedGatewayRxTimes[i].GetSeconds(),
+                                      ONE_NS_S,
+                                      "uplink: 2 x transmission + ground hop + gateway hop");
+            NS_TEST_ASSERT_MSG_EQ_TOL(m_replyTimes[i].GetSeconds(),
+                                      m_expectedReplyTimes[i].GetSeconds(),
+                                      ONE_NS_S,
+                                      "downlink: same hops in reverse");
+        }
+    }
+
+    static constexpr uint32_t PAYLOAD_BYTES = 200; //!< UDP payload size [bytes]
+    Ptr<NtnLinkManager> m_manager;                 //!< Link manager
+    uint32_t m_groundId{0};                        //!< Ground node ID
+    DataRate m_dataRate;                           //!< Link data rate
+    std::vector<Time> m_gatewayRxTimes;            //!< Arrival times at the gateway
+    std::vector<Time> m_expectedGatewayRxTimes;    //!< Expected arrival times at the gateway
+    std::vector<Time> m_replyTimes;                //!< Arrival times of replies at the ground
+    std::vector<Time> m_expectedReplyTimes;        //!< Expected reply arrival times
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
  * The futurenet-ntn test suite.
  */
 class FuturenetNtnTestSuite : public TestSuite
@@ -992,6 +1713,11 @@ class FuturenetNtnTestSuite : public TestSuite
         AddTestCase(new NtnReproducibilityTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnIntegrationTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnValidationScenarioTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnWalkerConstellationTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnMultiAssociationTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnStickyPolicyTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnGatewayTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnGatewayIntegrationTestCase, TestCase::Duration::QUICK);
     }
 };
 
