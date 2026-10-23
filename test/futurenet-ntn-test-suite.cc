@@ -42,6 +42,7 @@
 #include <fstream>
 #include <functional>
 #include <sstream>
+#include <tuple>
 #include <vector>
 
 using namespace ns3;
@@ -1264,6 +1265,110 @@ class NtnMultiAssociationTestCase : public TestCase
 
 /**
  * @ingroup futurenet-ntn-tests
+ * T3 for the second policy: StickyAssociationPolicy keeps a visible satellite, promotes a
+ * secondary one when the primary is lost, and in a scripted two-satellite pass makes one
+ * handover fewer than the baseline. It is selectable by name through NtnHelper::SetPolicy.
+ */
+class NtnStickyPolicyTestCase : public TestCase
+{
+  public:
+    NtnStickyPolicyTestCase()
+        : TestCase("T3 StickyAssociationPolicy stays until the satellite is lost")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        Ptr<StickyAssociationPolicy> policy = CreateObject<StickyAssociationPolicy>();
+        NtnAssociationState state;
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).satelliteId,
+                              ntn::NO_SATELLITE,
+                              "no candidates -> no association");
+        state.visibleCandidates = {{5, 20.0, 1.5e6, Time(0)},
+                                   {3, 60.0, 0.7e6, Time(0)},
+                                   {9, 45.0, 0.9e6, Time(0)}};
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).satelliteId, 3, "no current -> highest");
+        state.currentSatelliteId = 5;
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).satelliteId, 5, "current still visible");
+        state.currentSatelliteId = 7;
+        NS_TEST_ASSERT_MSG_EQ(policy->Select(state).satelliteId, 3, "current lost -> highest");
+
+        // Primary 7 lost, secondaries 5 and 9 still visible: promote 9 (higher of the two),
+        // keep 5, and fill the third place with the highest remaining satellite, 3.
+        state.maxAssociations = 3;
+        state.currentSecondarySatelliteIds = {5, 9};
+        NtnAssociationDecision decision = policy->Select(state);
+        NS_TEST_ASSERT_MSG_EQ(decision.satelliteId, 9, "highest secondary is promoted");
+        NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds.size(), 2, "two secondary");
+        NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds[0], 5, "kept secondary");
+        NS_TEST_ASSERT_MSG_EQ(decision.secondarySatelliteIds[1], 3, "new secondary");
+
+        // Scripted pass over a terminal at (0, 0), equatorial orbits moving east at
+        // w = 360 / 5792.3 s = 0.0622 deg/s. Satellite A starts 2 deg past the zenith, B 8 deg
+        // before it. After 80 s (5 deg) B is 3 deg away and A 7 deg: the baseline hands over to
+        // B, the sticky policy keeps A. After 240 s A is 16.9 deg away, beyond the 15.8 deg
+        // visibility limit, so the sticky policy now hands over to B as well.
+        const auto [baseAt80, baseAt240, baseHandovers] = RunPass("ns3::HighestElevationPolicy");
+        const auto [stickyAt80, stickyAt240, stickyHandovers] =
+            RunPass("ns3::StickyAssociationPolicy");
+        NS_TEST_ASSERT_MSG_EQ(baseAt80, 1, "baseline: B at 80 s");
+        NS_TEST_ASSERT_MSG_EQ(stickyAt80, 0, "sticky: still A at 80 s");
+        NS_TEST_ASSERT_MSG_EQ(baseAt240, 1, "baseline: B at 240 s");
+        NS_TEST_ASSERT_MSG_EQ(stickyAt240, 1, "sticky: B once A is lost");
+        NS_TEST_ASSERT_MSG_EQ(baseHandovers, 1, "baseline: one handover");
+        NS_TEST_ASSERT_MSG_EQ(stickyHandovers, 1, "sticky: one handover, later");
+    }
+
+    /**
+     * Run the two-satellite pass with one policy, updating at 0, 80 and 240 s.
+     * @param policyTypeId policy TypeId name
+     * @return (satellite index at 80 s, satellite index at 240 s, handovers); index 0 = A,
+     *         1 = B, -1 = none
+     */
+    std::tuple<int, int, uint32_t> RunPass(const std::string& policyTypeId)
+    {
+        NodeContainer sats;
+        sats.Create(2);
+        NodeContainer grounds;
+        grounds.Create(1);
+        NtnHelper ntn;
+        ntn.SetOrbitAttribute("OrbitInclination", DoubleValue(0.0));
+        ntn.SetOrbitAttribute("InitialPhase", DoubleValue(2.0));
+        ntn.SetPolicy(policyTypeId);
+        ntn.InstallSatellites(sats); // A at 2 deg, B at 2 + 180 deg: move B by hand below
+        sats.Get(1)->GetObject<CircularOrbitMobilityModel>()->SetInitialPhase(352.0);
+        ntn.InstallGroundTerminal(grounds.Get(0), 0.0, 0.0);
+        Ptr<NtnLinkManager> manager = ntn.GetLinkManager();
+        const uint32_t g = grounds.Get(0)->GetId();
+        auto index = [&]() {
+            const int32_t sat = manager->GetAssociatedSatellite(g);
+            if (sat == ntn::NO_SATELLITE)
+            {
+                return -1;
+            }
+            return sat == static_cast<int32_t>(sats.Get(0)->GetId()) ? 0 : 1;
+        };
+        int at80 = -2;
+        int at240 = -2;
+        Simulator::ScheduleNow(&NtnLinkManager::Update, manager);
+        Simulator::Schedule(Seconds(80), [&]() {
+            manager->Update();
+            at80 = index();
+        });
+        Simulator::Schedule(Seconds(240), [&]() {
+            manager->Update();
+            at240 = index();
+        });
+        Simulator::Run();
+        const uint32_t handovers = manager->GetHandoverCount(g);
+        Simulator::Destroy();
+        return {at80, at240, handovers};
+    }
+};
+
+/**
+ * @ingroup futurenet-ntn-tests
  * The futurenet-ntn test suite.
  */
 class FuturenetNtnTestSuite : public TestSuite
@@ -1285,6 +1390,7 @@ class FuturenetNtnTestSuite : public TestSuite
         AddTestCase(new NtnValidationScenarioTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnWalkerConstellationTestCase, TestCase::Duration::QUICK);
         AddTestCase(new NtnMultiAssociationTestCase, TestCase::Duration::QUICK);
+        AddTestCase(new NtnStickyPolicyTestCase, TestCase::Duration::QUICK);
     }
 };
 

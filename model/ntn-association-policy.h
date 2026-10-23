@@ -122,6 +122,39 @@ class HighestElevationPolicy : public NtnAssociationPolicy
     NtnAssociationDecision Select(const NtnAssociationState& state) override;
 };
 
+/**
+ * @ingroup futurenet-ntn
+ * "Sticky" policy: stay with the current satellite for as long as it is visible, and only
+ * choose a new one when it drops below MinElevation.
+ *
+ * The baseline policy switches as soon as another satellite climbs higher, so a terminal between
+ * two orbital planes can hand over back and forth. Each handover costs signalling and can lose
+ * packets in flight, so this policy trades a lower average elevation (longer path, slightly more
+ * delay) for fewer handovers.
+ *
+ * Rules (deterministic):
+ * 1. Primary: keep the current primary if it is still visible. Otherwise promote the highest
+ *    still-visible current secondary satellite (its link is already up, so this is a
+ *    make-before-break handover). Otherwise take the highest visible satellite.
+ * 2. Secondary (MaxAssociationsPerGround > 1): keep the current secondary satellites that are
+ *    still visible, then fill the free places with the highest remaining satellites.
+ * Ties go to the lowest node ID.
+ */
+class StickyAssociationPolicy : public NtnAssociationPolicy
+{
+  public:
+    /**
+     * Register this type.
+     * @return the object TypeId
+     */
+    static TypeId GetTypeId();
+
+    StickyAssociationPolicy();
+    ~StickyAssociationPolicy() override;
+
+    NtnAssociationDecision Select(const NtnAssociationState& state) override;
+};
+
 } // namespace ns3
 
 #endif // NTN_ASSOCIATION_POLICY_H
