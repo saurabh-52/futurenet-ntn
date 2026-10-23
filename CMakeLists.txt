@@ -7,6 +7,7 @@ build_lib(
     model/ntn-propagation-delay-model.cc
     model/ntn-visibility-model.cc
     model/ntn-association-policy.cc
+    model/ntn-link-manager.cc
   HEADER_FILES
     model/circular-orbit-mobility-model.h
     model/ntn-attribute-checkers.h
@@ -16,6 +17,7 @@ build_lib(
     model/ntn-propagation-delay-model.h
     model/ntn-visibility-model.h
     model/ntn-association-policy.h
+    model/ntn-link-manager.h
   LIBRARIES_TO_LINK
     ${libcore}
     ${libmobility}
