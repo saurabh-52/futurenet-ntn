@@ -1,0 +1,6 @@
+check,simulated,closed_form,unit
+ring_neighbour_distance,3608.455127,3608.455127,km
+ring_neighbour_delay,13.036511,13.036511,ms
+longest_isl_up,5658.680679,5658.692428,km
+isl_up_samples,404850,,count
+up_but_blocked_or_down_but_clear,0,0,count
