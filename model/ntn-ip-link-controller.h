@@ -14,6 +14,7 @@
 #include "ns3/point-to-point-net-device.h"
 
 #include <map>
+#include <string>
 #include <utility>
 
 namespace ns3
@@ -35,6 +36,16 @@ namespace ns3
  *
  * All links start down; a link is only up while its ground terminal is associated (as primary
  * or secondary) with that satellite.
+ *
+ * With gateways (SRS M01-FR-11) there is also one point-to-point link per gateway-satellite
+ * pair:
+ * - GatewayLinkDelayUpdate: sets that link's channel Delay;
+ * - GatewayAssociationChange: brings the old gateway link down and the new one up, points the
+ *   satellite's default route at the new gateway, and gives the new gateway a route back to
+ *   every ground terminal link subnet of this satellite. (Taking a link down makes ns-3 delete
+ *   the routes through it, so the old gateway's return routes disappear by themselves.)
+ *
+ * Together this forms the path ground terminal -> primary satellite -> gateway and back.
  */
 class NtnIpLinkController : public Object
 {
@@ -81,20 +92,61 @@ class NtnIpLinkController : public Object
      */
     Time GetChannelDelay(uint32_t groundId, uint32_t satelliteId) const;
 
+    /**
+     * Register the link of one gateway-satellite pair. Both devices must already have an IPv4
+     * address. The link is brought down until the satellite associates with this gateway.
+     * @param gatewayId gateway node ID
+     * @param satelliteId satellite node ID
+     * @param gatewayDevice gateway end of the link
+     * @param satelliteDevice satellite end of the link
+     */
+    void AddGatewayLink(uint32_t gatewayId,
+                        uint32_t satelliteId,
+                        Ptr<PointToPointNetDevice> gatewayDevice,
+                        Ptr<PointToPointNetDevice> satelliteDevice);
+
+    /**
+     * @param gatewayId gateway node ID
+     * @param satelliteId satellite node ID
+     * @return true if the IPv4 interfaces of this gateway link are up
+     */
+    bool IsGatewayLinkUp(uint32_t gatewayId, uint32_t satelliteId) const;
+
+    /**
+     * @param gatewayId gateway node ID
+     * @param satelliteId satellite node ID
+     * @return the current channel delay of this gateway link
+     */
+    Time GetGatewayChannelDelay(uint32_t gatewayId, uint32_t satelliteId) const;
+
   protected:
     void DoDispose() override;
 
   private:
-    /// Everything needed to control one ground-satellite IP link.
+    /// Everything needed to control one IP link between a satellite and a ground-side node
+    /// (a ground terminal, or a gateway for gateway links).
     struct IpLink
     {
         Ptr<PointToPointChannel> channel; //!< Shared channel (holds the Delay)
-        Ptr<Ipv4> groundIpv4;             //!< IPv4 stack of the ground terminal
+        Ptr<Ipv4> groundIpv4;             //!< IPv4 stack of the ground-side node
         Ptr<Ipv4> satelliteIpv4;          //!< IPv4 stack of the satellite
         uint32_t groundInterface{0};      //!< Ground-side IPv4 interface index
         uint32_t satelliteInterface{0};   //!< Satellite-side IPv4 interface index
+        Ipv4Address groundAddress;        //!< Ground-side address on this link
+        Ipv4Mask mask;                    //!< Network mask of this link's subnet
         Ipv4Address satelliteAddress;     //!< Satellite address on this link (next hop)
     };
+
+    /**
+     * Check two link devices and collect what is needed to control their link.
+     * @param name text identifying the link in error messages
+     * @param groundDevice ground-side end
+     * @param satelliteDevice satellite end
+     * @return the link description (aborts with a message on invalid input)
+     */
+    static IpLink MakeLink(const std::string& name,
+                           Ptr<PointToPointNetDevice> groundDevice,
+                           Ptr<PointToPointNetDevice> satelliteDevice);
 
     /**
      * LinkDelayUpdate handler.
@@ -119,6 +171,39 @@ class NtnIpLinkController : public Object
      * @param associated true if the satellite became a secondary association
      */
     void HandleSecondaryAssociationChange(uint32_t groundId, uint32_t satelliteId, bool associated);
+
+    /**
+     * GatewayLinkDelayUpdate handler.
+     * @param gatewayId gateway node ID
+     * @param satelliteId satellite node ID
+     * @param delay new one-way link delay
+     */
+    void HandleGatewayLinkDelayUpdate(uint32_t gatewayId, uint32_t satelliteId, Time delay);
+
+    /**
+     * GatewayAssociationChange handler.
+     * @param satelliteId satellite node ID
+     * @param oldGatewayId previous gateway (-1 = none)
+     * @param newGatewayId new gateway (-1 = none)
+     */
+    void HandleGatewayAssociationChange(uint32_t satelliteId,
+                                        int32_t oldGatewayId,
+                                        int32_t newGatewayId);
+
+    /**
+     * @param gatewayId gateway node ID
+     * @param satelliteId satellite node ID
+     * @return the registered gateway link (aborts if unknown)
+     */
+    const IpLink& GetGatewayLink(uint32_t gatewayId, uint32_t satelliteId) const;
+
+    /**
+     * Replace any default route of a node by one through the given next hop.
+     * @param ipv4 IPv4 stack of the node
+     * @param nextHop next-hop address
+     * @param interface outgoing interface index
+     */
+    static void SetDefaultRoute(Ptr<Ipv4> ipv4, Ipv4Address nextHop, uint32_t interface);
 
     /**
      * @param groundId ground terminal node ID
@@ -150,7 +235,9 @@ class NtnIpLinkController : public Object
     static void SetInterfaceUp(Ptr<Ipv4> ipv4, uint32_t interface, bool up);
 
     std::map<std::pair<uint32_t, uint32_t>, IpLink> m_links; //!< Links by (ground, satellite)
-    Ptr<NtnLinkManager> m_manager;                           //!< Manager being followed
+    /// Gateway links by (gateway, satellite)
+    std::map<std::pair<uint32_t, uint32_t>, IpLink> m_gatewayLinks;
+    Ptr<NtnLinkManager> m_manager; //!< Manager being followed
 };
 
 } // namespace ns3

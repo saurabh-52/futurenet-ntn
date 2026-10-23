@@ -72,6 +72,24 @@ struct NtnPairState
     bool associated{false};   //!< True if this satellite is the ground terminal's association
 };
 
+/**
+ * @ingroup futurenet-ntn
+ * The current end-to-end path of one ground terminal through the satellite network:
+ * ground terminal -> primary satellite -> that satellite's gateway (SRS M01-FR-11).
+ *
+ * For a satellite-gateway pair, NtnPairState is used with groundId = gateway node ID.
+ */
+struct NtnEndToEndPath
+{
+    uint32_t groundId{0};    //!< Ground terminal node ID
+    int32_t satelliteId{-1}; //!< Primary satellite node ID (-1 = none)
+    int32_t gatewayId{-1};   //!< Gateway of that satellite (-1 = none)
+    bool available{false};   //!< True if both hops exist
+    Time groundLinkDelay;    //!< Ground-satellite one-way link delay
+    Time gatewayLinkDelay;   //!< Satellite-gateway one-way link delay
+    Time totalDelay;         //!< Sum of both hops (excluding transmission times)
+};
+
 } // namespace ns3
 
 #endif // NTN_COMMON_TYPES_H

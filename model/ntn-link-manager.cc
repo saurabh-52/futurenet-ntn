@@ -8,6 +8,7 @@
 #include "ntn-constants.h"
 
 #include "ns3/abort.h"
+#include "ns3/boolean.h"
 #include "ns3/log.h"
 #include "ns3/simulator.h"
 #include "ns3/trace-source-accessor.h"
@@ -56,6 +57,13 @@ NtnLinkManager::GetTypeId()
                                                &NtnLinkManager::GetMaxAssociationsPerGround),
                           MakeUintegerChecker<uint32_t>(ntn::MIN_ASSOCIATIONS_PER_GROUND,
                                                         ntn::MAX_ASSOCIATIONS_PER_GROUND))
+            .AddAttribute("EnableGateway",
+                          "Allow gateway ground stations; each satellite then associates with "
+                          "the gateway that sees it highest (SRS M01-FR-11).",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&NtnLinkManager::SetEnableGateway,
+                                              &NtnLinkManager::GetEnableGateway),
+                          MakeBooleanChecker())
             .AddTraceSource("VisibilityChange",
                             "A satellite became visible or invisible from a ground terminal.",
                             MakeTraceSourceAccessor(&NtnLinkManager::m_visibilityChangeTrace),
@@ -81,7 +89,25 @@ NtnLinkManager::GetTypeId()
             .AddTraceSource("UpdateCompleted",
                             "An update of all ground-satellite pairs has finished.",
                             MakeTraceSourceAccessor(&NtnLinkManager::m_updateCompletedTrace),
-                            "ns3::NtnLinkManager::UpdateCompletedTracedCallback");
+                            "ns3::NtnLinkManager::UpdateCompletedTracedCallback")
+            .AddTraceSource(
+                "GatewayVisibilityChange",
+                "A satellite became visible or invisible from a gateway (gatewayId, "
+                "satelliteId, visible).",
+                MakeTraceSourceAccessor(&NtnLinkManager::m_gatewayVisibilityChangeTrace),
+                "ns3::NtnLinkManager::VisibilityChangeTracedCallback")
+            .AddTraceSource(
+                "GatewayAssociationChange",
+                "A satellite changed its gateway (satelliteId, oldGatewayId, newGatewayId; "
+                "-1 = none).",
+                MakeTraceSourceAccessor(&NtnLinkManager::m_gatewayAssociationChangeTrace),
+                "ns3::NtnLinkManager::GatewayAssociationChangeTracedCallback")
+            .AddTraceSource(
+                "GatewayLinkDelayUpdate",
+                "One-way delay of a visible satellite-gateway link (gatewayId, satelliteId, "
+                "delay), reported every update.",
+                MakeTraceSourceAccessor(&NtnLinkManager::m_gatewayLinkDelayUpdateTrace),
+                "ns3::NtnLinkManager::LinkDelayUpdateTracedCallback");
     return tid;
 }
 
@@ -91,7 +117,8 @@ NtnLinkManager::NtnLinkManager()
       m_policy(CreateObject<HighestElevationPolicy>()),
       m_updateInterval(MilliSeconds(ntn::DEFAULT_UPDATE_INTERVAL_MS)),
       m_dataRate(ntn::DEFAULT_DATA_RATE_BPS),
-      m_maxAssociations(ntn::DEFAULT_ASSOCIATIONS_PER_GROUND)
+      m_maxAssociations(ntn::DEFAULT_ASSOCIATIONS_PER_GROUND),
+      m_enableGateway(false)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -109,6 +136,9 @@ NtnLinkManager::DoDispose()
     m_grounds.clear();
     m_satellites.clear();
     m_pairs.clear();
+    m_gateways.clear();
+    m_gatewayPairs.clear();
+    m_satelliteGateways.clear();
     m_visibility = nullptr;
     m_delay = nullptr;
     m_policy = nullptr;
@@ -170,6 +200,51 @@ NtnLinkManager::AddSatelliteNode(Ptr<Node> node)
         pair.satelliteId = satelliteId;
         m_pairs[{groundId, satelliteId}] = pair;
     }
+    for (const auto& gateway : m_gateways)
+    {
+        const uint32_t gatewayId = gateway.node->GetId();
+        NtnPairState pair;
+        pair.groundId = gatewayId;
+        pair.satelliteId = satelliteId;
+        m_gatewayPairs[{gatewayId, satelliteId}] = pair;
+    }
+    m_satelliteGateways[satelliteId] = SatelliteGatewayEntry();
+}
+
+void
+NtnLinkManager::AddGatewayNode(Ptr<Node> node)
+{
+    NS_LOG_FUNCTION(this << node);
+    NS_ABORT_MSG_IF(!m_enableGateway,
+                    "Gateways are disabled; set the NtnLinkManager Attribute EnableGateway to "
+                    "true first");
+    Ptr<MobilityModel> mobility = RequireMobility(node);
+    const uint32_t gatewayId = node->GetId();
+    NS_ABORT_MSG_IF(
+        std::any_of(m_gateways.begin(),
+                    m_gateways.end(),
+                    [gatewayId](const NodeEntry& g) { return g.node->GetId() == gatewayId; }),
+        "Gateway node " << gatewayId << " is already registered");
+    m_gateways.push_back({node, mobility});
+    for (const auto& sat : m_satellites)
+    {
+        const uint32_t satelliteId = sat.node->GetId();
+        NtnPairState pair;
+        pair.groundId = gatewayId;
+        pair.satelliteId = satelliteId;
+        m_gatewayPairs[{gatewayId, satelliteId}] = pair;
+    }
+}
+
+NodeContainer
+NtnLinkManager::GetGatewayNodes() const
+{
+    NodeContainer nodes;
+    for (const auto& gateway : m_gateways)
+    {
+        nodes.Add(gateway.node);
+    }
+    return nodes;
 }
 
 NodeContainer
@@ -287,6 +362,21 @@ NtnLinkManager::GetMaxAssociationsPerGround() const
 }
 
 void
+NtnLinkManager::SetEnableGateway(bool enable)
+{
+    NS_LOG_FUNCTION(this << enable);
+    NS_ABORT_MSG_IF(!enable && !m_gateways.empty(),
+                    "EnableGateway cannot be switched off after gateways were registered");
+    m_enableGateway = enable;
+}
+
+bool
+NtnLinkManager::GetEnableGateway() const
+{
+    return m_enableGateway;
+}
+
+void
 NtnLinkManager::Start()
 {
     NS_LOG_FUNCTION(this);
@@ -320,6 +410,13 @@ NtnLinkManager::Update()
     for (const auto& sat : m_satellites)
     {
         satellitePositionsM.push_back(sat.mobility->GetPosition());
+    }
+
+    // Gateways first, so that listeners to ground association changes already see the
+    // satellite-gateway hop of this update.
+    if (!m_gateways.empty())
+    {
+        UpdateGateways(satellitePositionsM);
     }
 
     for (auto& ground : m_grounds)
@@ -367,6 +464,78 @@ NtnLinkManager::Update()
         ApplyDecision(ground, state, m_policy->Select(state));
     }
     m_updateCompletedTrace(now);
+}
+
+void
+NtnLinkManager::UpdateGateways(const std::vector<Vector>& satellitePositionsM)
+{
+    const Time now = Simulator::Now();
+    // Gateway positions do not depend on the satellite, so compute them once.
+    std::map<uint32_t, Vector> gatewayPositionsM;
+    for (const auto& gateway : m_gateways)
+    {
+        gatewayPositionsM[gateway.node->GetId()] = gateway.mobility->GetPosition();
+    }
+    for (std::size_t i = 0; i < m_satellites.size(); ++i)
+    {
+        const uint32_t satelliteId = m_satellites[i].node->GetId();
+        // Fixed rule: the visible gateway that sees the satellite at the highest elevation;
+        // ties go to the lowest node ID.
+        int32_t bestGateway = ntn::NO_SATELLITE;
+        double bestElevationDeg = 0.0;
+        for (const auto& gateway : m_gateways)
+        {
+            const uint32_t gatewayId = gateway.node->GetId();
+            NtnPairState& pair = m_gatewayPairs.at({gatewayId, satelliteId});
+            const Vector& gatewayPositionM = gatewayPositionsM.at(gatewayId);
+            pair.elevationDeg =
+                NtnVisibilityModel::ComputeElevationDeg(gatewayPositionM, satellitePositionsM[i]);
+            pair.slantRangeM =
+                NtnVisibilityModel::ComputeSlantRangeM(gatewayPositionM, satellitePositionsM[i]);
+            pair.propagationDelay = m_delay->GetPropagationDelay(pair.slantRangeM);
+            pair.linkDelay = m_delay->GetLinkDelay(pair.slantRangeM);
+
+            const bool visible = m_visibility->IsVisibleAtElevation(pair.elevationDeg);
+            if (visible != pair.visible)
+            {
+                pair.visible = visible;
+                NS_LOG_INFO("t=" << now.As(Time::S) << " gateway " << gatewayId << " satellite "
+                                 << satelliteId << (visible ? " visible" : " not visible"));
+                m_gatewayVisibilityChangeTrace(gatewayId, satelliteId, visible);
+            }
+            if (visible)
+            {
+                m_gatewayLinkDelayUpdateTrace(gatewayId, satelliteId, pair.linkDelay);
+                if (bestGateway == ntn::NO_SATELLITE || pair.elevationDeg > bestElevationDeg ||
+                    (pair.elevationDeg == bestElevationDeg &&
+                     gatewayId < static_cast<uint32_t>(bestGateway)))
+                {
+                    bestGateway = static_cast<int32_t>(gatewayId);
+                    bestElevationDeg = pair.elevationDeg;
+                }
+            }
+        }
+
+        SatelliteGatewayEntry& entry = m_satelliteGateways.at(satelliteId);
+        const int32_t oldGateway = entry.gateway;
+        if (bestGateway == oldGateway)
+        {
+            continue;
+        }
+        if (oldGateway != ntn::NO_SATELLITE)
+        {
+            m_gatewayPairs.at({static_cast<uint32_t>(oldGateway), satelliteId}).associated = false;
+        }
+        if (bestGateway != ntn::NO_SATELLITE)
+        {
+            m_gatewayPairs.at({static_cast<uint32_t>(bestGateway), satelliteId}).associated = true;
+        }
+        entry.gateway = bestGateway;
+        ++entry.changes;
+        NS_LOG_INFO("t=" << now.As(Time::S) << " satellite " << satelliteId << " gateway "
+                         << oldGateway << " -> " << bestGateway);
+        m_gatewayAssociationChangeTrace(satelliteId, oldGateway, bestGateway);
+    }
 }
 
 void
@@ -595,6 +764,13 @@ NtnLinkManager::GetMobilityState(uint32_t nodeId) const
             mobility = sat.mobility;
         }
     }
+    for (const auto& gateway : m_gateways)
+    {
+        if (gateway.node->GetId() == nodeId)
+        {
+            mobility = gateway.mobility;
+        }
+    }
     NS_ABORT_MSG_IF(!mobility, "Node " << nodeId << " is not registered with the link manager");
     NtnMobilityState state;
     state.nodeId = nodeId;
@@ -614,6 +790,69 @@ uint32_t
 NtnLinkManager::GetHandoverCount(uint32_t groundNodeId) const
 {
     return GetGround(groundNodeId).handovers;
+}
+
+int32_t
+NtnLinkManager::GetSatelliteGateway(uint32_t satelliteNodeId) const
+{
+    auto it = m_satelliteGateways.find(satelliteNodeId);
+    NS_ABORT_MSG_IF(it == m_satelliteGateways.end(),
+                    "Node " << satelliteNodeId << " is not a satellite");
+    return it->second.gateway;
+}
+
+NtnPairState
+NtnLinkManager::GetGatewayPairState(uint32_t gatewayNodeId, uint32_t satelliteNodeId) const
+{
+    auto it = m_gatewayPairs.find({gatewayNodeId, satelliteNodeId});
+    NS_ABORT_MSG_IF(it == m_gatewayPairs.end(),
+                    "Unknown gateway/satellite pair " << gatewayNodeId << "/" << satelliteNodeId);
+    return it->second;
+}
+
+std::vector<NtnPairState>
+NtnLinkManager::GetGatewayPairStates() const
+{
+    std::vector<NtnPairState> states;
+    states.reserve(m_gatewayPairs.size());
+    for (const auto& [key, pair] : m_gatewayPairs)
+    {
+        states.push_back(pair);
+    }
+    return states;
+}
+
+uint32_t
+NtnLinkManager::GetGatewayChangeCount(uint32_t satelliteNodeId) const
+{
+    auto it = m_satelliteGateways.find(satelliteNodeId);
+    NS_ABORT_MSG_IF(it == m_satelliteGateways.end(),
+                    "Node " << satelliteNodeId << " is not a satellite");
+    return it->second.changes;
+}
+
+NtnEndToEndPath
+NtnLinkManager::GetEndToEndPath(uint32_t groundNodeId) const
+{
+    NtnEndToEndPath path;
+    path.groundId = groundNodeId;
+    path.satelliteId = GetAssociatedSatellite(groundNodeId);
+    if (path.satelliteId == ntn::NO_SATELLITE)
+    {
+        return path;
+    }
+    const auto satelliteId = static_cast<uint32_t>(path.satelliteId);
+    path.groundLinkDelay = GetPair(groundNodeId, satelliteId).linkDelay;
+    path.gatewayId = GetSatelliteGateway(satelliteId);
+    if (path.gatewayId == ntn::NO_SATELLITE)
+    {
+        return path;
+    }
+    path.gatewayLinkDelay =
+        m_gatewayPairs.at({static_cast<uint32_t>(path.gatewayId), satelliteId}).linkDelay;
+    path.totalDelay = path.groundLinkDelay + path.gatewayLinkDelay;
+    path.available = true;
+    return path;
 }
 
 } // namespace ns3

@@ -131,6 +131,12 @@ NtnTraceWriter::Connect(Ptr<NtnLinkManager> manager)
         manager->TraceConnectWithoutContext(
             "SecondaryAssociationChange",
             MakeCallback(&NtnTraceWriter::HandleSecondaryAssociationChange, this));
+        manager->TraceConnectWithoutContext(
+            "GatewayVisibilityChange",
+            MakeCallback(&NtnTraceWriter::HandleGatewayVisibilityChange, this));
+        manager->TraceConnectWithoutContext(
+            "GatewayAssociationChange",
+            MakeCallback(&NtnTraceWriter::HandleGatewayAssociationChange, this));
     }
 }
 
@@ -142,16 +148,25 @@ NtnTraceWriter::HandleUpdateCompleted(Time now)
         return;
     }
     m_nextSampleTime = now + m_sampleInterval;
-    constexpr double MS_PER_S = 1e3;
     for (const auto& pair : m_manager->GetPairStates())
     {
-        m_linkStateFile << std::setprecision(TIME_DECIMALS) << now.GetSeconds() << ','
-                        << pair.groundId << ',' << pair.satelliteId << ',' << (pair.visible ? 1 : 0)
-                        << ',' << std::setprecision(VALUE_DECIMALS) << pair.elevationDeg << ','
-                        << pair.slantRangeM / M_PER_KM << ','
-                        << pair.linkDelay.GetSeconds() * MS_PER_S << ','
-                        << (pair.associated ? 1 : 0) << '\n';
+        WriteLinkStateRow(now, pair);
     }
+    for (const auto& pair : m_manager->GetGatewayPairStates())
+    {
+        WriteLinkStateRow(now, pair);
+    }
+}
+
+void
+NtnTraceWriter::WriteLinkStateRow(Time now, const NtnPairState& pair)
+{
+    constexpr double MS_PER_S = 1e3;
+    m_linkStateFile << std::setprecision(TIME_DECIMALS) << now.GetSeconds() << ',' << pair.groundId
+                    << ',' << pair.satelliteId << ',' << (pair.visible ? 1 : 0) << ','
+                    << std::setprecision(VALUE_DECIMALS) << pair.elevationDeg << ','
+                    << pair.slantRangeM / M_PER_KM << ',' << pair.linkDelay.GetSeconds() * MS_PER_S
+                    << ',' << (pair.associated ? 1 : 0) << '\n';
 }
 
 void
@@ -206,6 +221,48 @@ NtnTraceWriter::HandleSecondaryAssociationChange(uint32_t groundId,
                    << satelliteId << ",," << std::setprecision(VALUE_DECIMALS) << pair.elevationDeg
                    << ',' << pair.linkDelay.GetSeconds() * MS_PER_S << ",elevation_deg|delay_ms,"
                    << (associated ? "added" : "removed") << '\n';
+}
+
+void
+NtnTraceWriter::HandleGatewayVisibilityChange(uint32_t gatewayId,
+                                              uint32_t satelliteId,
+                                              bool visible)
+{
+    const NtnPairState pair = m_manager->GetGatewayPairState(gatewayId, satelliteId);
+    m_eventLogFile << std::setprecision(TIME_DECIMALS) << Simulator::Now().GetSeconds() << ','
+                   << MODULE_NAME << ",GatewayVisibilityChange," << gatewayId << ',' << satelliteId
+                   << ",," << std::setprecision(VALUE_DECIMALS) << pair.elevationDeg << ','
+                   << pair.slantRangeM / M_PER_KM << ",elevation_deg|range_km,"
+                   << (visible ? "visible" : "not_visible") << '\n';
+}
+
+void
+NtnTraceWriter::HandleGatewayAssociationChange(uint32_t satelliteId,
+                                               int32_t oldGatewayId,
+                                               int32_t newGatewayId)
+{
+    // Same layout as AssociationChange, with the satellite as node and the gateway as peer.
+    std::string detail = "handover";
+    if (oldGatewayId == ntn::NO_SATELLITE)
+    {
+        detail = "acquired";
+    }
+    else if (newGatewayId == ntn::NO_SATELLITE)
+    {
+        detail = "lost";
+    }
+    m_eventLogFile << std::setprecision(TIME_DECIMALS) << Simulator::Now().GetSeconds() << ','
+                   << MODULE_NAME << ",GatewayAssociationChange," << satelliteId << ','
+                   << newGatewayId << ",," << oldGatewayId << ',';
+    if (newGatewayId != ntn::NO_SATELLITE)
+    {
+        constexpr double MS_PER_S = 1e3;
+        const NtnPairState pair =
+            m_manager->GetGatewayPairState(static_cast<uint32_t>(newGatewayId), satelliteId);
+        m_eventLogFile << std::setprecision(VALUE_DECIMALS)
+                       << pair.linkDelay.GetSeconds() * MS_PER_S;
+    }
+    m_eventLogFile << ",old_gateway_id|delay_ms," << detail << '\n';
 }
 
 } // namespace ns3
