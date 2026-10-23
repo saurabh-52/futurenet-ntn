@@ -1,0 +1,2 @@
+altitude_km,range_km,propagation_delay_ms,sim_link_delay_ms,closed_form_link_delay_ms,abs_error_ns
+600.000000000,600.000000000,2.001385000,3.001385000,3.001384571,0.428811088
